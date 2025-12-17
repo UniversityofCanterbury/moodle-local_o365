@@ -1058,9 +1058,9 @@ class main {
                 }
             }
 
-            $entraidusers[$i]['useridentifier'] = $user[$bindingusernameclaim];
+            $entraidusers[$i]['useridentifier'] = $user[$bindingusernameclaim].'@canterbury.ac.nz';
 
-            $useridentifierlower = core_text::strtolower($user[$bindingusernameclaim]);
+            $useridentifierlower = core_text::strtolower($user[$bindingusernameclaim].'@canterbury.ac.nz');
             $entraidusers[$i]['useridentifierlower'] = $useridentifierlower;
 
             $usernames[] = $useridentifierlower;
