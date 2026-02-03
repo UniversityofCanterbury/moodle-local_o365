@@ -87,7 +87,7 @@ class sync extends scheduled_task {
                 }
 
                 // Use recordset instead of get_records to reduce memory usage.
-                $oidcusersrecordset = $DB->get_recordset('user', ['auth' => 'shibboleth', 'deleted' => 0]);
+                $oidcusersrecordset = $DB->get_recordset('user', ['auth' => 'oidc', 'deleted' => 0]);
                 foreach ($oidcusersrecordset as $userid => $oidcuser) {
                     $completeuser = get_complete_user_data('id', $userid);
                     if ($completeuser) {
