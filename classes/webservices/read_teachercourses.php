@@ -25,7 +25,7 @@
 
 namespace local_o365\webservices;
 
-use context_course;
+use core\context\course;
 use moodle_exception;
 
 defined('MOODLE_INTERNAL') || die();
@@ -91,7 +91,7 @@ class read_teachercourses extends external_api {
                 continue;
             }
 
-            $context = context_course::instance($course->id, IGNORE_MISSING);
+            $context = course::instance($course->id, IGNORE_MISSING);
 
             // Validate the user can execute functions in this course.
             try {
@@ -138,8 +138,11 @@ class read_teachercourses extends external_api {
                     'format' => new external_value(PARAM_PLUGIN, 'course format: weeks, topics, social, site', VALUE_OPTIONAL),
                     'showgrades' => new external_value(PARAM_BOOL, 'true if grades are shown, otherwise false', VALUE_OPTIONAL),
                     'lang' => new external_value(PARAM_LANG, 'forced course language', VALUE_OPTIONAL),
-                    'enablecompletion' => new external_value(PARAM_BOOL, 'true if completion is enabled, otherwise false',
-                        VALUE_OPTIONAL),
+                    'enablecompletion' => new external_value(
+                        PARAM_BOOL,
+                        'true if completion is enabled, otherwise false',
+                        VALUE_OPTIONAL
+                    ),
                 ]
             )
         );

@@ -29,6 +29,9 @@ namespace local_o365\rest;
 use core_date;
 use core_text;
 use DateTime;
+use dml_exception;
+use local_o365\httpclientinterface;
+use local_o365\oauth2\apptoken;
 use local_o365\oauth2\clientdata;
 use local_o365\obj\o365user;
 use local_o365\utils;
@@ -44,9 +47,43 @@ require_once($CFG->dirroot . '/local/o365/lib.php');
  */
 class unified extends o365api {
     /**
+     * Maximum number of records per page for Microsoft Graph API batch requests.
+     * This is the Graph API maximum limit.
+     *
+     * @var int
+     */
+    const GRAPH_API_BATCH_SIZE = 999;
+
+    /**
+     * Number of groups to fetch member and owner data for in a single Microsoft Graph $batch call.
+     * Graph allows 20 requests per batch and each group costs 2 (transitive members + owners).
+     *
+     * @var int
+     */
+    const GROUPS_PER_BATCH_REQUEST = 10;
+
+    /**
      * @var string The general API area of the class.
      */
     public $apiarea = 'graph';
+
+    /**
+     * Custom claim fields requested in the most recent batched user query but never returned for
+     * any user. Read and cleared via get_and_clear_dropped_custom_claim_fields().
+     *
+     * @var array
+     */
+    protected array $lastdroppedcustomclaimfields = [];
+
+    /**
+     * The Microsoft OAuth2 token resource
+     */
+    public const RESOURCE_URL = 'https://graph.microsoft.com';
+
+    /**
+     * The Chinese API OAuth2 token resource
+     */
+    public const RESOURCE_URL_CHINESE = 'https://microsoftgraph.chinacloudapi.cn';
 
     /**
      * Determine if the API client is configured.
@@ -62,28 +99,29 @@ class unified extends o365api {
      * Get the API client's oauth2 resource.
      *
      * @return string The resource for oauth2 tokens.
+     * @throws dml_exception
      */
     public static function get_tokenresource(): string {
+        if (static::use_chinese_api() === true) {
+            return self::RESOURCE_URL_CHINESE;
+        }
+
         $oidcresource = get_config('auth_oidc', 'oidcresource');
         if (!empty($oidcresource)) {
             return $oidcresource;
-        } else {
-            return (static::use_chinese_api() === true) ? 'https://microsoftgraph.chinacloudapi.cn' : 'https://graph.microsoft.com';
         }
+
+        return self::RESOURCE_URL;
     }
 
     /**
      * Get the base URI that API calls should be sent to.
      *
-     * @return string|bool The URI to send API calls to, or false if a precondition failed.
+     * @return string The URI to send API calls to.
+     * @throws dml_exception
      */
-    public function get_apiuri() {
-        $oidcresource = get_config('auth_oidc', 'oidcresource');
-        if (!empty($oidcresource)) {
-            return $oidcresource;
-        } else {
-            return (static::use_chinese_api() === true) ? 'https://microsoftgraph.chinacloudapi.cn' : 'https://graph.microsoft.com';
-        }
+    public function get_apiuri(): string {
+        return self::get_tokenresource();
     }
 
     /**
@@ -103,6 +141,7 @@ class unified extends o365api {
                 return $apicomponent;
             }
         }
+
         return 'graph';
     }
 
@@ -119,10 +158,12 @@ class unified extends o365api {
         if ($apimethod[0] !== '/') {
             $apimethod = '/' . $apimethod;
         }
+
         $apimethod = '/beta' . $apimethod;
         if (empty($options['apiarea'])) {
             $options['apiarea'] = $this->generate_apiarea($apimethod);
         }
+
         return parent::apicall($httpmethod, $apimethod, $params, $options);
     }
 
@@ -139,9 +180,11 @@ class unified extends o365api {
         if ($apimethod[0] !== '/') {
             $apimethod = '/' . $apimethod;
         }
+
         if (empty($options['apiarea'])) {
             $options['apiarea'] = $this->generate_apiarea($apimethod);
         }
+
         $apimethod = '/v1.0' . $apimethod;
         return parent::apicall($httpmethod, $apimethod, $params, $options);
     }
@@ -162,8 +205,18 @@ class unified extends o365api {
      * @return array The result of the API call.
      * @throws moodle_exception
      */
-    public function paginatedapicall($httpmethod, $apimethod, $odataqueries = [], $expectedstructure = ['value' => null],
-        $betaapi = false, $params = '', $options = [], $skipparam = '$skiptoken', $deltalink = '', $deltatokenparam = '') {
+    public function paginatedapicall(
+        $httpmethod,
+        $apimethod,
+        $odataqueries = [],
+        $expectedstructure = ['value' => null],
+        $betaapi = false,
+        $params = '',
+        $options = [],
+        $skipparam = '$skiptoken',
+        $deltalink = '',
+        $deltatokenparam = ''
+    ) {
         $content = [];
 
         $originalapimethod = $apimethod;
@@ -206,12 +259,11 @@ class unified extends o365api {
                     $content = array_merge($content, $result['value']);
                 }
 
+                $skiptoken = null;
                 if (isset($result['odata.nextLink'])) {
                     $skiptoken = $this->extract_param_from_link($result['odata.nextLink'], $skipparam);
                 } else if (isset($result['@odata.nextLink'])) {
                     $skiptoken = $this->extract_param_from_link($result['@odata.nextLink'], $skipparam);
-                } else {
-                    $skiptoken = null;
                 }
 
                 if ($deltalink && $deltatokenparam && isset($result[$deltalink])) {
@@ -224,28 +276,41 @@ class unified extends o365api {
 
         if ($deltatokenvalue) {
             return [$content, $deltatokenvalue];
-        } else {
-            return $content;
         }
+
+        return $content;
     }
 
     /**
-     * Test a tenant value.
+     * Test a tenant value by requesting an application token from the tenant.
      *
-     * @param string $tenant A tenant string to test.
-     * @return bool True if tenant succeeded, false if not.
-     * @throws moodle_exception
+     * The token is only used to confirm that the tenant exists and accepts the configured application credentials. It is not
+     * stored, and the tenant setting is not changed.
+     *
+     * @param string $tenant A tenant string (domain name or ID) to test.
+     * @param httpclientinterface $httpclient An HTTP client.
+     * @return bool True if an application token was issued by the tenant, false if not.
      */
-    public function test_tenant(string $tenant): bool {
-        if (!is_string($tenant)) {
-            throw new moodle_exception('errortenantvaluenotstring', 'local_o365');
+    public static function test_tenant(string $tenant, httpclientinterface $httpclient): bool {
+        apptoken::reset_last_error();
+        $tenant = trim($tenant);
+        if ($tenant === '') {
+            return false;
         }
-        $oidcconfig = get_config('auth_oidc');
-        $appinfo = $this->get_application_info();
-        if (isset($appinfo['value']) && isset($appinfo['value'][0]['id'])) {
-            return $appinfo['value'][0]['id'] === $oidcconfig->clientid;
+
+        try {
+            $clientdata = clientdata::instance_from_oidc($tenant);
+            if (empty($clientdata->get_apptokenendpoint())) {
+                return false;
+            }
+
+            $token = apptoken::get_app_token(static::get_tokenresource(), $clientdata, $httpclient);
+        } catch (moodle_exception $e) {
+            utils::debug($e->getMessage(), __METHOD__, $e);
+            return false;
         }
-        return false;
+
+        return !empty($token) && !empty($token['access_token']);
     }
 
     /**
@@ -262,6 +327,7 @@ class unified extends o365api {
                 return $domain['id'];
             }
         }
+
         throw new moodle_exception('erroracpapcantgettenant', 'local_o365');
     }
 
@@ -287,7 +353,6 @@ class unified extends o365api {
                     }
                 }
             }
-
         }
 
         array_unshift($domainnames, $defaultdomainname);
@@ -309,6 +374,7 @@ class unified extends o365api {
             $prefix = substr($tenant, 0, -$sufflen);
             return $prefix . '-my.sharepoint.com';
         }
+
         throw new moodle_exception('erroracpcantgettenant', 'local_o365');
     }
 
@@ -324,6 +390,7 @@ class unified extends o365api {
         if ($cleanresource !== $tokenresource) {
             return false;
         }
+
         $fullcleanresource = 'https://' . $cleanresource;
         $token = utils::get_application_token($fullcleanresource, $clientdata, $this->httpclient);
         return !empty($token);
@@ -354,8 +421,10 @@ class unified extends o365api {
                 $record->assigned = 1;
                 $DB->update_record('local_o365_appassign', $record);
             }
+
             return $response;
         }
+
         return null;
     }
 
@@ -408,8 +477,8 @@ class unified extends o365api {
 
         if (!empty($extra)) {
             // Set extra parameters.
-            foreach ($extra as $name => $value) {
-                $groupdata[$name] = $value;
+            foreach ($extra as $extraname => $value) {
+                $groupdata[$extraname] = $value;
             }
         }
 
@@ -418,7 +487,9 @@ class unified extends o365api {
             unset($groupdata['description']);
         }
 
-        $response = $this->apicall('post', '/groups', json_encode($groupdata));
+        $jsondata = json_encode($groupdata);
+
+        $response = $this->apicall('post', '/groups', $jsondata);
         $expectedparams = ['id' => null];
         try {
             $response = $this->process_apicall_response($response, $expectedparams);
@@ -448,12 +519,15 @@ class unified extends o365api {
         if (empty($groupdata['id'])) {
             throw new moodle_exception('invalidgroupdata', 'local_o365');
         }
+
         if (!isset($groupdata['mailEnabled'])) {
             $groupdata['mailEnabled'] = false;
         }
+
         if (!isset($groupdata['securityEnabled'])) {
             $groupdata['securityEnabled'] = false;
         }
+
         if (!isset($groupdata['groupTypes'])) {
             $groupdata['groupTypes'] = ['Unified'];
         }
@@ -462,6 +536,7 @@ class unified extends o365api {
         if (empty($groupdata['description'])) {
             unset($groupdata['description']);
         }
+
         $response = $this->apicall('patch', '/groups/' . $groupdata['id'], json_encode($groupdata));
 
         return $this->process_apicall_response($response);
@@ -481,6 +556,80 @@ class unified extends o365api {
     }
 
     /**
+     * Look up multiple groups by object ID using batch requests.
+     * Microsoft Graph allows up to 20 requests per batch.
+     *
+     * @param array $objectids Array of group object IDs to look up.
+     * @return array Associative array keyed by the requested object ID. Each value is the
+     *               group data array on success, or null if the group was genuinely not found
+     *               (per-request status 404).
+     * @throws moodle_exception If the batch request itself fails (e.g. network or auth error),
+     *                          or if a per-request status other than 200/404 is returned (e.g.
+     *                          403, 429, 5xx) — such statuses indicate a service-level failure,
+     *                          not proof the group doesn't exist.
+     */
+    public function get_groups_batch(array $objectids): array {
+        if (empty($objectids)) {
+            return [];
+        }
+
+        $results = [];
+        $chunks = array_chunk($objectids, 20); // Max 20 requests per batch.
+
+        foreach ($chunks as $chunk) {
+            $batchrequests = [];
+            $idtoobjectidmap = [];
+
+            // Pre-initialise every object ID to null so that IDs absent from the batch
+            // response are treated as "not found" by the caller.
+            foreach ($chunk as $objectid) {
+                $results[$objectid] = null;
+            }
+
+            foreach ($chunk as $index => $objectid) {
+                $requestid = (string) ($index + 1);
+                $idtoobjectidmap[$requestid] = $objectid;
+                $batchrequests[] = [
+                    'id' => $requestid,
+                    'method' => 'GET',
+                    'url' => '/groups/' . $objectid,
+                ];
+            }
+
+            $batchpayload = ['requests' => $batchrequests];
+            $response = $this->betaapicall('post', '/$batch', json_encode($batchpayload));
+            $batchresponse = $this->process_apicall_response($response, ['responses' => null]);
+
+            if (!empty($batchresponse['responses']) && is_array($batchresponse['responses'])) {
+                foreach ($batchresponse['responses'] as $individualresponse) {
+                    $requestid = $individualresponse['id'] ?? null;
+                    if ($requestid === null || !isset($idtoobjectidmap[$requestid])) {
+                        continue;
+                    }
+
+                    $objectid = $idtoobjectidmap[$requestid];
+                    $status = $individualresponse['status'] ?? null;
+
+                    if ($status === 200 && !empty($individualresponse['body']['id'])) {
+                        $results[$objectid] = $individualresponse['body'];
+                    } else if ($status === 404) {
+                        // Genuinely not found; already pre-initialised to null above.
+                        continue;
+                    } else {
+                        // Any other status (403, 429, 5xx, etc.) is a service-level failure,
+                        // not proof the group doesn't exist, so don't silently report it as
+                        // "not found" and mislead callers validating group IDs.
+                        $errmsg = 'Batch lookup for group ' . $objectid . ' failed with status ' . $status;
+                        throw new moodle_exception('erroro365apibadcall_message', 'local_o365', '', htmlentities($errmsg));
+                    }
+                }
+            }
+        }
+
+        return $results;
+    }
+
+    /**
      * Get group urls.
      *
      * @param string $objectid The object ID of the group.
@@ -493,6 +642,7 @@ class unified extends o365api {
         if (empty($group['mailNickname'])) {
             return null;
         }
+
         $config = get_config('local_o365');
         $o365urls = [];
         $url = preg_replace("/-my.sharepoint.com/", ".sharepoint.com", $config->odburl);
@@ -503,6 +653,7 @@ class unified extends o365api {
                 'notebook' => 'https://' . $url . '/_layouts/groupstatus.aspx?id=' . $objectid . '&target=notebook',
             ];
         }
+
         $o365urls += [
             'conversations' => 'https://outlook.office.com/owa/?path=/group/' . $group['mail'] . '/mail',
             'calendar' => 'https://outlook.office365.com/owa/?path=/group/' . $group['mail'] . '/calendar',
@@ -512,6 +663,7 @@ class unified extends o365api {
         } catch (moodle_exception $e) {
             $teamurl = null;
         }
+
         if ($teamurl) {
             $o365urls['team'] = $teamurl;
         }
@@ -572,6 +724,7 @@ class unified extends o365api {
         if (empty($objectid)) {
             return null;
         }
+
         $response = $this->apicall('delete', '/groups/' . $objectid);
         return ($response === '') ? true : $response;
     }
@@ -611,6 +764,22 @@ class unified extends o365api {
         $endpoint = '/groups/' . $groupobjectid . '/members';
 
         return $this->paginatedapicall('get', $endpoint);
+    }
+
+    /**
+     * Get a list of transitive group members (users only).
+     *
+     * Uses the typed endpoint to return only user objects and limit fields to reduce payload size.
+     *
+     * @param string $groupobjectid The object ID of the group.
+     * @return array Array of returned user members with id field only.
+     * @throws moodle_exception
+     */
+    public function get_transitive_group_members(string $groupobjectid): array {
+        $endpoint = '/groups/' . $groupobjectid . '/transitiveMembers/microsoft.graph.user';
+        $odataqueries = ['$select' => 'id'];
+
+        return $this->paginatedapicall('get', $endpoint, $odataqueries);
     }
 
     /**
@@ -664,9 +833,11 @@ class unified extends o365api {
         if (empty($skiptoken) || !is_string($skiptoken)) {
             $skiptoken = '';
         }
+
         if (!empty($skiptoken)) {
             $odataqueries[] = '$skiptoken=' . $skiptoken;
         }
+
         if (!empty($odataqueries)) {
             $endpoint .= '?' . implode('&', $odataqueries);
         }
@@ -851,8 +1022,10 @@ class unified extends o365api {
      * @return array|null
      * @throws moodle_exception
      */
-    public function remove_owner_and_member_from_group_using_teams_api(string $groupobjectid,
-        string $aaduserconversationmemberid): ?array {
+    public function remove_owner_and_member_from_group_using_teams_api(
+        string $groupobjectid,
+        string $aaduserconversationmemberid
+    ): ?array {
         $endpoint = '/teams/' . $groupobjectid . '/members/' . $aaduserconversationmemberid;
 
         $response = $this->apicall('delete', $endpoint);
@@ -869,8 +1042,12 @@ class unified extends o365api {
      * @return array|null file upload response.
      * @throws moodle_exception
      */
-    public function create_group_file(string $groupid, string $filename, string $content,
-        string $contenttype = 'text/plain'): ?array {
+    public function create_group_file(
+        string $groupid,
+        string $filename,
+        string $content,
+        string $contenttype = 'text/plain'
+    ): ?array {
         $filename = rawurlencode($filename);
         $endpoint = "/groups/$groupid/drive/root:/$filename:/content";
         $fileresponse = $this->apicall('put', $endpoint, ['file' => $content], ['contenttype' => $contenttype]);
@@ -887,9 +1064,9 @@ class unified extends o365api {
     protected function get_default_user_fields(bool $guestuser = false): array {
         $defaultfields =
             ['id', 'userPrincipalName', 'displayName', 'givenName', 'surname', 'mail', 'streetAddress', 'city', 'postalCode',
-                'state', 'country', 'jobTitle', 'department', 'companyName', 'preferredLanguage', 'employeeId', 'businessPhones',
-                'faxNumber', 'mobilePhone', 'officeLocation', 'manager', 'teams', 'roles', 'groups', 'accountEnabled',
-                'onPremisesExtensionAttributes', 'onPremisesSamAccountName'];
+                'state', 'country', 'jobTitle', 'department', 'companyName', 'preferredLanguage', 'employeeId', 'employeeType',
+                'businessPhones', 'faxNumber', 'mobilePhone', 'officeLocation', 'manager', 'teams', 'roles', 'groups',
+                'accountEnabled', 'onPremisesExtensionAttributes', 'onPremisesSamAccountName'];
         if (!$guestuser) {
             $defaultfields[] = 'preferredName';
         }
@@ -898,20 +1075,264 @@ class unified extends o365api {
     }
 
     /**
-     * Get all users in the configured directory.
+     * Get required user fields based on field mappings and essential sync fields.
+     * This optimizes API calls by only requesting fields that are actually used.
      *
-     * @param string|array $params Requested user parameters.
-     * @return array|null Array of user information, or null if failure.
+     * @return array Array of required user fields.
+     */
+    protected function get_required_user_fields(): array {
+        global $CFG;
+
+        // Essential fields always needed for user sync.
+        $essentialfields = [
+            'id', // User object ID.
+            'userPrincipalName', // Primary identifier.
+            'accountEnabled', // Account status.
+            'mail', // Email address.
+        ];
+
+        // Add binding username claim field if configured.
+        require_once($CFG->dirroot . '/auth/oidc/lib.php');
+        $bindingusernameclaim = auth_oidc_get_binding_username_claim();
+        $bindingfieldmap = [
+            'upn' => 'userPrincipalName',
+            'oid' => 'id',
+            'samaccountname' => 'onPremisesSamAccountName',
+            'email' => 'mail',
+            'auto' => 'userPrincipalName',
+        ];
+        if (isset($bindingfieldmap[$bindingusernameclaim])) {
+            $essentialfields[] = $bindingfieldmap[$bindingusernameclaim];
+        }
+
+        // Get fields from auth_oidc field mappings.
+        $mappedfields = [];
+        if (function_exists('auth_oidc_get_field_mappings')) {
+            $fieldmappings = auth_oidc_get_field_mappings();
+            foreach ($fieldmappings as $fieldmapping) {
+                if (isset($fieldmapping['field_map']) && !empty($fieldmapping['field_map'])) {
+                    $remotefield = $fieldmapping['field_map'];
+
+                    if (auth_oidc_is_custom_claim_prefixed_key($remotefield)) {
+                        // Token claims colliding with built-in fields are not Graph properties.
+                        continue;
+                    }
+
+                    // Handle extension attributes.
+                    if (strpos($remotefield, 'extensionAttribute') === 0) {
+                        $mappedfields[] = 'onPremisesExtensionAttributes';
+                    } else if ($remotefield === 'manager' || $remotefield === 'manager_email') {
+                        $mappedfields[] = 'manager';
+                    } else if (
+                        !in_array(
+                            $remotefield,
+                            ['bindingusernameclaim', 'objectId', 'teams', 'groups', 'roles',
+                            'sds_school_id', 'sds_school_name', 'sds_school_role', 'sds_student_externalId',
+                            'sds_student_birthDate', 'sds_student_grade', 'sds_student_graduationYear',
+                            'sds_student_studentNumber', 'sds_teacher_externalId', 'sds_teacher_teacherNumber']
+                        )
+                    ) {
+                        // Add valid Graph API fields, excluding special fields.
+                        $mappedfields[] = $remotefield;
+                    }
+                }
+            }
+        }
+
+        // Merge and deduplicate.
+        $requiredfields = array_unique(array_merge($essentialfields, $mappedfields));
+
+        return $requiredfields;
+    }
+
+    /**
+     * Get the subset of a requested field list that are configured "custom claims".
+     *
+     * Custom claim names come from the identity provider's tokens (see the "Custom claims"
+     * auth_oidc setting), not from Microsoft Graph, so they are not guaranteed to also be
+     * selectable Graph user properties. They are returned separately so their presence in
+     * returned user records can be tracked (see track_custom_claim_field_presence()), and any
+     * that Graph does not recognise can be reported instead of the sync silently doing nothing
+     * for that field.
+     *
+     * @param array $params The field list requested from Graph.
+     * @return array The fields in $params that are configured custom claims.
+     */
+    protected function get_custom_claim_fields_in(array $params): array {
+        global $CFG;
+
+        require_once($CFG->dirroot . '/auth/oidc/lib.php');
+
+        return array_values(array_intersect($params, auth_oidc_get_validated_custom_claim_names()));
+    }
+
+    /**
+     * Get and clear the list of custom claim fields that were requested in the last batched user
+     * query but never returned for any user — how Microsoft Graph typically responds to a $select
+     * property it does not recognise, rather than returning an API error. See
+     * track_custom_claim_field_presence() and record_unsupported_custom_claim_fields().
+     *
+     * @return array
+     */
+    public function get_and_clear_dropped_custom_claim_fields(): array {
+        $dropped = $this->lastdroppedcustomclaimfields;
+        $this->lastdroppedcustomclaimfields = [];
+
+        return $dropped;
+    }
+
+    /**
+     * Wrap a page handler so it also tracks which of the given custom claim fields Microsoft
+     * Graph actually returned a key for, in at least one user record.
+     *
+     * Microsoft Graph does not reliably return an API error for a $select property it does not
+     * recognise; it typically just omits that key from every returned record instead. A field
+     * that is genuinely selectable (even if its value happens to be empty for every synced user)
+     * is still returned with a null value, so checking for key presence distinguishes "not a
+     * Graph property" from "no value set".
+     *
+     * @param callable $pagehandler The original page handler.
+     * @param array $droppablefields Configured custom claim fields present in the current $select.
+     * @param array $seenfields Reference used to accumulate which of $droppablefields were seen;
+     *                          inspect it once pagination completes via
+     *                          record_unsupported_custom_claim_fields().
+     * @return callable
+     */
+    protected function track_custom_claim_field_presence(
+        callable $pagehandler,
+        array $droppablefields,
+        array &$seenfields
+    ): callable {
+        return function (array $result) use ($pagehandler, $droppablefields, &$seenfields): int {
+            if (!empty($droppablefields) && !empty($result['value']) && is_array($result['value'])) {
+                foreach ($result['value'] as $user) {
+                    if (!is_array($user)) {
+                        continue;
+                    }
+                    foreach ($droppablefields as $field) {
+                        if (!isset($seenfields[$field]) && array_key_exists($field, $user)) {
+                            $seenfields[$field] = true;
+                        }
+                    }
+                    if (count($seenfields) >= count($droppablefields)) {
+                        break;
+                    }
+                }
+            }
+
+            return $pagehandler($result);
+        };
+    }
+
+    /**
+     * Record, as dropped, any configured custom claim fields that were requested but never seen
+     * in a returned user record. See track_custom_claim_field_presence() for how $seenfields is
+     * populated.
+     *
+     * @param array $droppablefields Configured custom claim fields that were requested.
+     * @param array $seenfields Fields (as keys) actually observed in at least one user record.
+     * @return void
+     */
+    protected function record_unsupported_custom_claim_fields(array $droppablefields, array $seenfields): void {
+        $missing = array_values(array_diff($droppablefields, array_keys($seenfields)));
+        if (empty($missing)) {
+            return;
+        }
+
+        $this->lastdroppedcustomclaimfields = array_unique(array_merge($this->lastdroppedcustomclaimfields, $missing));
+    }
+
+    /**
+     * Execute a paginated OData GET query, invoking a page-handler for each API response page.
+     *
+     * This is the single shared implementation of the pagination loop used by
+     * process_users_batched, process_users_delta_batched, and process_users_minimal_batched.
+     * Each public method supplies its own $pagehandler closure containing only the logic that
+     * differs between modes (deduplication, delta-link capture, etc.).
+     *
+     * The helper automatically:
+     *  - Appends $skiptoken to queries on subsequent pages.
+     *  - Drops $deltatoken from queries when a $skiptoken is present (Graph API requirement).
+     *  - Captures @odata.deltaLink on the last page of delta queries.
+     *  - Extracts the next $skiptoken from @odata.nextLink / odata.nextLink.
+     *
+     * @param string $endpoint Base API endpoint, e.g. "/users" or "/users/delta".
+     * @param array $odataqueries Initial OData query parameters (modified in place per page).
+     * @param callable $pagehandler Receives the full parsed API result array for each page.
+     *                              Must return int: the number of items processed from that page.
+     * @return array [int $totalprocessed, string|null $deltatokenvalue]
      * @throws moodle_exception
      */
-    public function get_users($params = 'default'): ?array {
-        $endpoint = "/users";
-        $odataqueries = [];
+    private function execute_odata_paginated(string $endpoint, array $odataqueries, callable $pagehandler): array {
+        $totalprocessed = 0;
+        $deltatokenvalue = null;
+        $continue = true;
+        $skiptoken = null;
 
-        // Select params.
-        if ($params === 'default') {
-            $params = $this->get_default_user_fields();
+        while ($continue) {
+            if (!empty($skiptoken)) {
+                $odataqueries['$skiptoken'] = $skiptoken;
+                // Graph API does not accept both $deltatoken and $skiptoken simultaneously.
+                if (isset($odataqueries['$deltatoken'])) {
+                    unset($odataqueries['$deltatoken']);
+                }
+            }
+
+            // Build OData query string.
+            $odataquerystring = '';
+            foreach ($odataqueries as $odataqueryname => $odataqueryvalue) {
+                $odataquerystring .= $odataqueryname . '=' . $odataqueryvalue . '&';
+            }
+            $apimethod = $endpoint;
+            if ($odataquerystring) {
+                $apimethod = $endpoint . '?' . rtrim($odataquerystring, '&');
+            }
+
+            $response = $this->apicall('get', $apimethod);
+            $result = $this->process_apicall_response($response, ['value' => null]);
+
+            if (!empty($result) && is_array($result)) {
+                $totalprocessed += $pagehandler($result);
+
+                // Extract skiptoken for the next page.
+                if (isset($result['odata.nextLink'])) {
+                    $skiptoken = $this->extract_param_from_link($result['odata.nextLink'], '$skiptoken');
+                } else if (isset($result['@odata.nextLink'])) {
+                    $skiptoken = $this->extract_param_from_link($result['@odata.nextLink'], '$skiptoken');
+                } else {
+                    $skiptoken = null;
+                }
+
+                // Capture deltaLink token from the last page of delta queries.
+                if (isset($result['@odata.deltaLink'])) {
+                    $deltatokenvalue = $this->extract_param_from_link($result['@odata.deltaLink'], '$deltatoken');
+                }
+            }
+
+            $continue = !empty($skiptoken);
         }
+
+        return [$totalprocessed, $deltatokenvalue];
+    }
+
+    /**
+     * Process users in batches with a callback function.
+     * This method retrieves 500 users per API call and processes them immediately with the callback,
+     * reducing memory usage by not loading all users into memory at once.
+     *
+     * @param callable $callback Function to call for each batch of users. Receives array of users as parameter.
+     * @param string|array $params User fields to select (use 'default' for default fields)
+     * @return int Total number of users processed
+     * @throws moodle_exception
+     */
+    public function process_users_batched(callable $callback, $params = 'default'): int {
+        $odataqueries = [];
+        $droppablefields = [];
+
+        if ($params === 'default') {
+            $params = $this->get_required_user_fields();
+        }
+
         if (is_array($params)) {
             $excludedfields = ['preferredName', 'teams', 'groups', 'roles'];
             foreach ($excludedfields as $excludedfield) {
@@ -919,31 +1340,176 @@ class unified extends o365api {
                     unset($params[$key]);
                 }
             }
+            $droppablefields = $this->get_custom_claim_fields_in($params);
             $odataqueries['$select'] = implode(',', $params);
         }
 
-        return $this->paginatedapicall('get', $endpoint, $odataqueries);
+        $odataqueries['$top'] = (string)self::GRAPH_API_BATCH_SIZE;
+
+        $pagehandler = function (array $result) use ($callback): int {
+            if (!empty($result['value']) && is_array($result['value'])) {
+                $callback($result['value']);
+                return count($result['value']);
+            }
+            return 0;
+        };
+
+        $seenfields = [];
+        $pagehandler = $this->track_custom_claim_field_presence($pagehandler, $droppablefields, $seenfields);
+
+        [$totalprocessed] = $this->execute_odata_paginated('/users', $odataqueries, $pagehandler);
+        if ($totalprocessed > 0) {
+            // Only judge field support when at least one user record was actually seen; an empty
+            // result proves nothing either way.
+            $this->record_unsupported_custom_claim_fields($droppablefields, $seenfields);
+        }
+
+        return $totalprocessed;
     }
 
     /**
-     * Return users delta.
+     * Process users delta in batches with a callback function.
+     * This method retrieves 500 users per API call and processes them immediately with the callback,
+     * reducing memory usage by not loading all users into memory at once.
      *
-     * @param array|string $params
-     * @param string|null $deltatoken
-     * @return array
+     * @param callable $callback Function to call for each batch of users. Receives array of users as parameter.
+     * @param string|array $params User fields to select (use 'default' for default fields)
+     * @param string|null $deltatoken Delta token from previous sync
+     * @return array [total number of users processed, new delta token, bool fields mapping changed]
+     * @throws moodle_exception
      */
-    public function get_users_delta($params, ?string $deltatoken = null): array {
-        $endpoint = "/users/delta";
+    public function process_users_delta_batched(callable $callback, $params = 'default', ?string $deltatoken = null): array {
         $odataqueries = [];
+        $fieldsmappingchanged = false;
+        $droppablefields = [];
+
+        if ($params === 'default') {
+            $params = $this->get_required_user_fields();
+        }
+
+        if (is_array($params)) {
+            $excludedfields = ['preferredName', 'teams', 'groups', 'roles'];
+            foreach ($excludedfields as $excludedfield) {
+                if (($key = array_search($excludedfield, $params)) !== false) {
+                    unset($params[$key]);
+                }
+            }
+
+            // Sort to ensure consistent ordering regardless of how callers supply the field list.
+            sort($params);
+            $droppablefields = $this->get_custom_claim_fields_in($params);
+            $selectfields = implode(',', $params);
+            $odataqueries['$select'] = $selectfields;
+
+            // Check if field list has changed since last delta sync.
+            // Delta tokens include the field list, so if fields change, we must invalidate the token.
+            $currentfieldshash = md5($selectfields);
+
+            if (!empty($deltatoken)) {
+                $storedfieldshash = get_config('local_o365', 'task_usersync_fieldshash');
+
+                if ($storedfieldshash && $storedfieldshash !== $currentfieldshash) {
+                    // Field mappings have changed - invalidate delta token and start fresh.
+                    $deltatoken = null;
+                    $fieldsmappingchanged = true;
+                }
+            }
+
+            // Store current fields hash for comparison on next sync.
+            set_config('task_usersync_fieldshash', $currentfieldshash, 'local_o365');
+        }
 
         if (!empty($deltatoken)) {
             $odataqueries['$deltatoken'] = $deltatoken;
         }
 
-        // Select params.
-        if ($params === 'default') {
-            $params = $this->get_default_user_fields();
+        $odataqueries['$top'] = (string)self::GRAPH_API_BATCH_SIZE;
+
+        // Track seen IDs across pages to handle the known Graph API issue where
+        // the same user can appear in multiple delta pages.
+        $knownids = [];
+
+        $pagehandler = function (array $result) use ($callback, &$knownids): int {
+            if (empty($result['value']) || !is_array($result['value'])) {
+                return 0;
+            }
+
+            $batch = $result['value'];
+
+            // Remove duplicates (O(1) hash-map lookup) and tombstone records.
+            foreach ($batch as $key => $user) {
+                if (isset($knownids[$user['id']]) || isset($user['@removed'])) {
+                    unset($batch[$key]);
+                } else {
+                    $knownids[$user['id']] = true;
+                }
+            }
+
+            if (!empty($batch)) {
+                $callback($batch);
+            }
+            return count($batch);
+        };
+
+        $seenfields = [];
+        $pagehandler = $this->track_custom_claim_field_presence($pagehandler, $droppablefields, $seenfields);
+
+        [$totalprocessed, $deltatokenvalue] = $this->execute_odata_paginated('/users/delta', $odataqueries, $pagehandler);
+        if ($totalprocessed > 0) {
+            // Only judge field support when at least one user record was actually seen; a delta
+            // run with no changed users proves nothing either way.
+            $this->record_unsupported_custom_claim_fields($droppablefields, $seenfields);
         }
+
+        return [$totalprocessed, $deltatokenvalue, $fieldsmappingchanged];
+    }
+
+    /**
+     * Process users in batches with minimal fields (id and accountEnabled, plus any extra fields requested).
+     * This method is optimized for suspend/reenable operations that only need user IDs.
+     *
+     * @param callable $callback Function to call for each batch of users. Receives array of users as parameter.
+     * @param array $extraselect Additional Graph user resource fields to include in $select (e.g. 'userPrincipalName').
+     * @return int Total number of users processed
+     * @throws moodle_exception
+     */
+    public function process_users_minimal_batched(callable $callback, array $extraselect = []): int {
+        $selectfields = array_values(array_unique(array_merge(['id', 'accountEnabled'], $extraselect)));
+        $odataqueries = [
+            '$select' => implode(',', $selectfields),
+            '$top'    => (string)self::GRAPH_API_BATCH_SIZE,
+        ];
+
+        $pagehandler = function (array $result) use ($callback): int {
+            if (!empty($result['value']) && is_array($result['value'])) {
+                $callback($result['value']);
+                return count($result['value']);
+            }
+            return 0;
+        };
+
+        [$totalprocessed] = $this->execute_odata_paginated('/users', $odataqueries, $pagehandler);
+        return $totalprocessed;
+    }
+
+    /**
+     * Process users from a specific group in batches with a callback function.
+     * This fetches members of the specified group using the /groups/{id}/members endpoint.
+     *
+     * @param string $groupid The Microsoft 365 group object ID
+     * @param callable $callback Function to call for each batch of users. Receives array of users as parameter.
+     * @param string|array $params User fields to select (use 'default' for default fields)
+     * @return int Total number of users processed
+     * @throws moodle_exception
+     */
+    public function process_group_members_batched(string $groupid, callable $callback, $params = 'default'): int {
+        $odataqueries = [];
+        $droppablefields = [];
+
+        if ($params === 'default') {
+            $params = $this->get_required_user_fields();
+        }
+
         if (is_array($params)) {
             $excludedfields = ['preferredName', 'teams', 'groups', 'roles'];
             foreach ($excludedfields as $excludedfield) {
@@ -951,28 +1517,219 @@ class unified extends o365api {
                     unset($params[$key]);
                 }
             }
+            $droppablefields = $this->get_custom_claim_fields_in($params);
             $odataqueries['$select'] = implode(',', $params);
         }
 
-        [$users, $deltatoken] = $this->paginatedapicall('get', $endpoint, $odataqueries, ['value' => null], false, '', [],
-            '$skiptoken', '@odata.deltaLink', '$deltatoken');
+        $odataqueries['$top'] = (string)self::GRAPH_API_BATCH_SIZE;
 
-        $knownids = [];
-        foreach ($users as $key => $user) {
-            // There is a known issue in delta queries where the same user can be returned multiple times in the initial run.
-            if (in_array($user['id'], $knownids)) {
-                unset($users[$key]);
-            } else {
-                $knownids[] = $user['id'];
-            }
+        $ownerids = [];
 
-            // Remove deleted users.
-            if (isset($user['@removed'])) {
-                unset($users[$key]);
+        // Fetch group owners first.
+        $ownerqueries = $odataqueries;
+        $ownerqueries['$top'] = '999'; // Owners list is typically small.
+        $ownerpage = function (array $result) use (&$ownerids): int {
+            if (!empty($result['value']) && is_array($result['value'])) {
+                foreach ($result['value'] as $owner) {
+                    if (!empty($owner['id'])) {
+                        $ownerids[$owner['id']] = $owner;
+                    }
+                }
+                return count($result['value']);
             }
+            return 0;
+        };
+
+        // Track custom claim field presence across both the owner and member queries, since
+        // together they cover everyone this method returns to the caller.
+        $seenfields = [];
+        $ownerpage = $this->track_custom_claim_field_presence($ownerpage, $droppablefields, $seenfields);
+
+        $ownerendpoint = "/groups/{$groupid}/owners/microsoft.graph.user";
+        $this->execute_odata_paginated($ownerendpoint, $ownerqueries, $ownerpage);
+
+        // Fetch group members. As each page arrives, remove seen members from $ownerids
+        // so only genuine owner-only accounts remain after pagination completes.
+        $pagehandler = function (array $result) use ($callback, &$ownerids): int {
+            if (!empty($result['value']) && is_array($result['value'])) {
+                $users = $result['value'];
+                foreach ($users as $user) {
+                    if (!empty($user['id'])) {
+                        unset($ownerids[$user['id']]);
+                    }
+                }
+                $callback($users);
+                return count($users);
+            }
+            return 0;
+        };
+        $pagehandler = $this->track_custom_claim_field_presence($pagehandler, $droppablefields, $seenfields);
+
+        $endpoint = "/groups/{$groupid}/members/microsoft.graph.user";
+        [$totalprocessed] = $this->execute_odata_paginated($endpoint, $odataqueries, $pagehandler);
+
+        // Emit owners who were not present in any members page (owner-only accounts).
+        // This is done once after all member pages to avoid duplicate processing.
+        if (!empty($ownerids)) {
+            $owneronly = array_values($ownerids);
+            $callback($owneronly);
+            $totalprocessed += count($owneronly);
         }
 
-        return [$users, $deltatoken];
+        if ($totalprocessed > 0) {
+            // Only judge field support when at least one user record was actually seen; an empty
+            // group proves nothing either way.
+            $this->record_unsupported_custom_claim_fields($droppablefields, $seenfields);
+        }
+
+        return $totalprocessed;
+    }
+
+    /**
+     * Process users from a specific group in batches using delta (incremental) sync.
+     *
+     * Microsoft Graph API does not support delta queries directly on /groups/{id}/members.
+     * This method works around that limitation by:
+     *   1. Fetching the current group member and owner IDs upfront (id-only, lightweight).
+     *   2. Running the standard tenant-wide /users/delta query using the supplied token.
+     *   3. Filtering each delta page client-side to only pass group members to the callback.
+     *
+     * This preserves the efficiency of delta sync (only changed user records are transferred)
+     * while ensuring the group filter is strictly honoured. The delta token is stored and
+     * reused across runs just like an unfiltered delta sync.
+     *
+     * Known limitation: a user who existed in the tenant for a long time but was only recently
+     * added to the group may not appear in the delta (their user object may not have changed).
+     * Periodic full syncs (nodelta mode) handle this edge case.
+     *
+     * @param string $groupid The Microsoft 365 group object ID
+     * @param callable $callback Function to call for each filtered batch of group-member users
+     * @param string|array $params User fields to select (use 'default' for default fields)
+     * @param string|null $deltatoken Delta token from a previous sync, or null for a full initial sync
+     * @return array [total group-member users processed, new delta token, bool fields mapping changed]
+     * @throws moodle_exception
+     */
+    public function process_group_members_delta_batched(
+        string $groupid,
+        callable $callback,
+        $params = 'default',
+        ?string $deltatoken = null
+    ): array {
+        // Step 1: Fetch current group member and owner IDs (id field only — lightweight).
+        $memberids = [];
+        $idquery = ['$select' => 'id', '$top' => '999'];
+        $idhandler = function (array $result) use (&$memberids): int {
+            if (!empty($result['value']) && is_array($result['value'])) {
+                foreach ($result['value'] as $user) {
+                    if (!empty($user['id'])) {
+                        $memberids[$user['id']] = true;
+                    }
+                }
+                return count($result['value']);
+            }
+            return 0;
+        };
+
+        $this->execute_odata_paginated("/groups/{$groupid}/members/microsoft.graph.user", $idquery, $idhandler);
+        $this->execute_odata_paginated("/groups/{$groupid}/owners/microsoft.graph.user", $idquery, $idhandler);
+
+        if (empty($memberids)) {
+            // Group is empty or inaccessible — nothing to sync. Clear the delta token so the
+            // next run re-evaluates group membership from scratch.
+            utils::debug('Group ' . $groupid . ' has no members or owners; skipping delta sync.', __METHOD__);
+            return [0, null, false];
+        }
+
+        utils::debug(
+            'Group filter active (' . count($memberids) . ' members/owners). Running filtered tenant delta.',
+            __METHOD__
+        );
+
+        // Step 2: Build the OData query for the tenant-wide delta, replicating the fields-hash
+        // invalidation logic from process_users_delta_batched so token management is consistent.
+        $odataqueries = [];
+        $fieldsmappingchanged = false;
+        $droppablefields = [];
+
+        if ($params === 'default') {
+            $params = $this->get_required_user_fields();
+        }
+
+        if (is_array($params)) {
+            $excludedfields = ['preferredName', 'teams', 'groups', 'roles'];
+            foreach ($excludedfields as $excludedfield) {
+                if (($key = array_search($excludedfield, $params)) !== false) {
+                    unset($params[$key]);
+                }
+            }
+
+            sort($params);
+            $droppablefields = $this->get_custom_claim_fields_in($params);
+            $selectfields = implode(',', $params);
+            $odataqueries['$select'] = $selectfields;
+
+            $currentfieldshash = md5($selectfields);
+            if (!empty($deltatoken)) {
+                $storedfieldshash = get_config('local_o365', 'task_usersync_fieldshash');
+                if ($storedfieldshash && $storedfieldshash !== $currentfieldshash) {
+                    $deltatoken = null;
+                    $fieldsmappingchanged = true;
+                }
+            }
+
+            set_config('task_usersync_fieldshash', $currentfieldshash, 'local_o365');
+        }
+
+        if (!empty($deltatoken)) {
+            $odataqueries['$deltatoken'] = $deltatoken;
+        }
+
+        $odataqueries['$top'] = (string)self::GRAPH_API_BATCH_SIZE;
+
+        // Step 3: Stream the delta, filtering each page to group members/owners only.
+        // Deduplication (same user on multiple pages) mirrors process_users_delta_batched.
+        $knownids = [];
+        $pagehandler = function (array $result) use ($callback, &$knownids, $memberids): int {
+            if (empty($result['value']) || !is_array($result['value'])) {
+                return 0;
+            }
+
+            $batch = $result['value'];
+
+            // Remove duplicates and tombstone (deleted) records.
+            foreach ($batch as $key => $user) {
+                if (isset($knownids[$user['id']]) || isset($user['@removed'])) {
+                    unset($batch[$key]);
+                } else {
+                    $knownids[$user['id']] = true;
+                }
+            }
+
+            // Filter to group members and owners only.
+            $batch = array_values(array_filter($batch, function (array $user) use ($memberids): bool {
+                return !empty($user['id']) && isset($memberids[$user['id']]);
+            }));
+
+            if (!empty($batch)) {
+                $callback($batch);
+            }
+
+            return count($batch);
+        };
+
+        // Track presence against the full (pre group-filter) delta response, which gives the
+        // broadest sample of whether Microsoft Graph recognises each custom claim field.
+        $seenfields = [];
+        $pagehandler = $this->track_custom_claim_field_presence($pagehandler, $droppablefields, $seenfields);
+
+        [$totalprocessed, $deltatokenvalue] = $this->execute_odata_paginated('/users/delta', $odataqueries, $pagehandler);
+        if ($totalprocessed > 0) {
+            // Only judge field support when at least one user record was actually seen; a delta
+            // run with no changed users proves nothing either way.
+            $this->record_unsupported_custom_claim_fields($droppablefields, $seenfields);
+        }
+
+        return [$totalprocessed, $deltatokenvalue, $fieldsmappingchanged];
     }
 
     /**
@@ -1014,8 +1771,14 @@ class unified extends o365api {
      */
     public function get_user_transitive_groups(string $userobjectid): ?array {
         $endpoint = "users/$userobjectid/getMemberGroups";
-        return $this->paginatedapicall('post', $endpoint, [], ['value' => null], false,
-            json_encode(['securityEnabledOnly' => false]));
+        return $this->paginatedapicall(
+            'post',
+            $endpoint,
+            [],
+            ['value' => null],
+            false,
+            json_encode(['securityEnabledOnly' => false])
+        );
     }
 
     /**
@@ -1058,6 +1821,7 @@ class unified extends o365api {
         if (!empty($types)) {
             $data['types'] = $types;
         }
+
         $response = $this->apicall('post', $endpoint, json_encode($data));
         $result = $this->process_apicall_response($response, ['value' => null]);
         return $result['value'];
@@ -1079,6 +1843,7 @@ class unified extends o365api {
                 return $output[$param];
             }
         }
+
         return null;
     }
 
@@ -1092,6 +1857,30 @@ class unified extends o365api {
         $endpoint = '/directory/deleteditems/Microsoft.Graph.User';
 
         return $this->paginatedapicall('get', $endpoint, [], ['value' => null], true);
+    }
+
+    /**
+     * Process recently deleted users with a callback, streaming to avoid memory overhead.
+     *
+     * Calls the callback for each batch of deleted users from the API, allowing processing
+     * without loading all deleted users into memory at once.
+     *
+     * @param callable $callback Function called with array of deleted user objects from each API page.
+     * @return void
+     * @throws moodle_exception
+     */
+    public function process_deleted_users_batched(callable $callback): void {
+        $odataqueries = ['$top' => (string)self::GRAPH_API_BATCH_SIZE];
+
+        $pagehandler = function (array $result) use ($callback): int {
+            if (!empty($result['value']) && is_array($result['value'])) {
+                $callback($result['value']);
+                return count($result['value']);
+            }
+            return 0;
+        };
+
+        $this->execute_odata_paginated('/directory/deleteditems/Microsoft.Graph.User', $odataqueries, $pagehandler);
     }
 
     /**
@@ -1137,9 +1926,11 @@ class unified extends o365api {
         if (!isset($return['Id']) && isset($return['id'])) {
             $return['Id'] = $return['id'];
         }
+
         if (!isset($return['Name']) && isset($return['name'])) {
             $return['Name'] = $return['name'];
         }
+
         return $return;
     }
 
@@ -1156,10 +1947,12 @@ class unified extends o365api {
         if (empty($calendearid) || empty($updated)) {
             return [];
         }
+
         $updateddata = [];
         if (!empty($updated['name'])) {
             $updateddata['name'] = $updated['name'];
         }
+
         $updateddata = json_encode($updateddata);
         $response = $this->apicall('patch', '/users/' . $upn . '/calendars/' . $calendearid, $updateddata);
         $expectedparams = ['id' => null];
@@ -1180,8 +1973,16 @@ class unified extends o365api {
      * @return array|null Returned response, or null if error.
      * @throws moodle_exception
      */
-    public function create_event(string $subject, string $body, int $starttime, int $endtime, array $attendees, array $other,
-        ?string $calendarid, string $upn): ?array {
+    public function create_event(
+        string $subject,
+        string $body,
+        int $starttime,
+        int $endtime,
+        array $attendees,
+        array $other,
+        ?string $calendarid,
+        string $upn
+    ): ?array {
         $eventdata = [
             'subject' => $subject,
             'body' => [
@@ -1203,11 +2004,12 @@ class unified extends o365api {
             $eventdata['attendees'][] = [
                 'EmailAddress' => [
                     'Address' => $attendee->email,
-                    'Name' => $attendee->firstname.' '.$attendee->lastname,
+                    'Name' => $attendee->firstname . ' ' . $attendee->lastname,
                 ],
                 'type' => 'Resource',
             ];
         }
+
         $eventdata = array_merge($eventdata, $other);
         $eventdata = json_encode($eventdata);
         $endpoint = (!empty($calendarid)) ? '/users/' . $upn . '/calendars/' . $calendarid . '/events' :
@@ -1218,6 +2020,7 @@ class unified extends o365api {
         if (!isset($return['Id']) && isset($return['id'])) {
             $return['Id'] = $return['id'];
         }
+
         return $return;
     }
 
@@ -1234,8 +2037,15 @@ class unified extends o365api {
      * @return array|null Returned response, or null if error.
      * @throws moodle_exception
      */
-    public function create_group_event(string $subject, string $body, int $starttime, int $endtime, array $attendees,
-        array $other = [], $calendarid = null) {
+    public function create_group_event(
+        string $subject,
+        string $body,
+        int $starttime,
+        int $endtime,
+        array $attendees,
+        array $other = [],
+        $calendarid = null
+    ) {
         $eventdata = [
             'subject' => $subject,
             'body' => [
@@ -1256,11 +2066,12 @@ class unified extends o365api {
             $eventdata['attendees'][] = [
                 'emailAddress' => [
                     'address' => $attendee->email,
-                    'name' => $attendee->firstname.' '.$attendee->lastname,
+                    'name' => $attendee->firstname . ' ' . $attendee->lastname,
                 ],
                 'type' => 'resource',
             ];
         }
+
         $eventdata = array_merge($eventdata, $other);
         $eventdata = json_encode($eventdata);
         $endpoint = "/groups/{$calendarid}/calendar/events";
@@ -1270,6 +2081,7 @@ class unified extends o365api {
         if (!isset($return['Id']) && isset($return['id'])) {
             $return['Id'] = $return['id'];
         }
+
         return $return;
     }
 
@@ -1312,23 +2124,29 @@ class unified extends o365api {
         if (empty($outlookeventid) || empty($updated)) {
             return [];
         }
+
         $updateddata = [];
         if (!empty($updated['subject'])) {
             $updateddata['subject'] = $updated['subject'];
         }
+
         if (!empty($updated['body'])) {
             $updateddata['body'] = ['contentType' => 'HTML', 'content' => $updated['body']];
         }
+
         if (!empty($updated['starttime'])) {
             $updateddata['start'] =
                 ['dateTime' => date('c', $updated['starttime']), 'timeZone' => date('T', $updated['starttime'])];
         }
+
         if (!empty($updated['endtime'])) {
             $updateddata['end'] = ['dateTime' => date('c', $updated['endtime']), 'timeZone' => date('T', $updated['endtime'])];
         }
+
         if (!empty($updated['responseRequested'])) {
             $updateddata['responseRequested'] = $updated['responseRequested'];
         }
+
         if (isset($updated['attendees'])) {
             $updateddata['attendees'] = [];
             foreach ($updated['attendees'] as $attendee) {
@@ -1353,7 +2171,9 @@ class unified extends o365api {
      * @param string $outlookeventid The event ID in o365 outlook.
      * @param string $owner user's userPrincipalName or group object id
      * @param string $scope 'user' or 'group'
-     * @return bool Success/Failure.
+     * @return bool True if the event was deleted, false if it wasn't found (there's nothing left to delete).
+     * @throws moodle_exception If Microsoft refuses the request, for example when a group calendar event is
+     *                          deleted with a token that isn't a user's own.
      */
     public function delete_event(string $outlookeventid, string $owner, string $scope = 'user'): bool {
         if (!empty($outlookeventid)) {
@@ -1361,9 +2181,66 @@ class unified extends o365api {
                 ? '/groups/' . $owner . '/events/' . $outlookeventid
                 : '/users/' . $owner . '/events/' . $outlookeventid;
 
-            $this->apicall('delete', $path);
+            $response = $this->apicall('delete', $path);
+
+            $httpcode = $this->httpclient->info['http_code'] ?? 0;
+            if ($httpcode == 404) {
+                return false;
+            }
+
+            if ($httpcode >= 400) {
+                // Throws with Microsoft's error message if the response has one.
+                $this->process_apicall_response($response, ['id' => null]);
+                throw new moodle_exception('erroro365apibadcall', 'local_o365');
+            }
         }
+
         return true;
+    }
+
+    /**
+     * Get the iCalUId and attendees of an event.
+     *
+     * @param string $outlookeventid The event ID in o365 outlook.
+     * @param string $owner user's userPrincipalName or group object id
+     * @param string $scope 'user' or 'group'
+     * @return array|null The event's 'iCalUId' and 'attendees', or null if error.
+     * @throws moodle_exception
+     */
+    public function get_event_attendee_info(string $outlookeventid, string $owner, string $scope = 'user'): ?array {
+        $path = $scope === 'group'
+            ? '/groups/' . $owner . '/events/' . $outlookeventid
+            : '/users/' . $owner . '/events/' . $outlookeventid;
+
+        $response = $this->apicall('get', $path . '?$select=iCalUId,attendees');
+        return $this->process_apicall_response($response, ['iCalUId' => null]);
+    }
+
+    /**
+     * Delete a user's own copy of a meeting, identified by the meeting's iCalUId, from their calendar.
+     *
+     * Used after a user is removed as an attendee of a shared event: Outlook leaves them a "Canceled" copy of
+     * the meeting, which this removes.
+     *
+     * @param string $upn user's userPrincipalName
+     * @param string $icaluid The meeting's iCalUId.
+     * @return int The number of copies deleted.
+     * @throws moodle_exception
+     */
+    public function delete_event_copies_by_icaluid(string $upn, string $icaluid): int {
+        $filter = rawurlencode('iCalUId eq \'' . str_replace('\'', '\'\'', $icaluid) . '\'');
+        $response = $this->apicall('get', '/users/' . $upn . '/events?$select=id&$filter=' . $filter);
+        $result = $this->process_apicall_response($response, ['value' => null]);
+
+        $deleted = 0;
+        foreach ($result['value'] as $copy) {
+            if (!empty($copy['id'])) {
+                $this->delete_event($copy['id'], $upn);
+                $deleted++;
+            }
+        }
+
+        return $deleted;
     }
 
     /**
@@ -1377,14 +2254,20 @@ class unified extends o365api {
      * @return array|null
      * @throws moodle_exception
      */
-    public function create_file(string $parentid, string $filename, string $content, string $contenttype,
-        string $o365userid): ?array {
+    public function create_file(
+        string $parentid,
+        string $filename,
+        string $content,
+        string $contenttype,
+        string $o365userid
+    ): ?array {
         $filename = rawurlencode($filename);
         if (!empty($parentid)) {
             $endpoint = "/users/$o365userid/drive/items/$parentid:/$filename:/content";
         } else {
             $endpoint = "/users/$o365userid/drive/items/root:/$filename:/content";
         }
+
         $fileresponse = $this->apicall('put', $endpoint, ['file' => $content], ['contenttype' => $contenttype]);
         $expectedparams = ['id' => null];
         return $this->process_apicall_response($fileresponse, $expectedparams);
@@ -1410,9 +2293,11 @@ class unified extends o365api {
         if (empty($skiptoken) || !is_string($skiptoken)) {
             $skiptoken = '';
         }
+
         if (!empty($skiptoken)) {
             $odataqueries[] = '$skiptoken=' . $skiptoken;
         }
+
         if (!empty($odataqueries)) {
             $endpoint .= '?' . implode('&', $odataqueries);
         }
@@ -1438,9 +2323,11 @@ class unified extends o365api {
         if (empty($skiptoken) || !is_string($skiptoken)) {
             $skiptoken = '';
         }
+
         if (!empty($skiptoken)) {
             $odataqueries[] = '$skiptoken=' . $skiptoken;
         }
+
         if (!empty($odataqueries)) {
             $endpoint .= '?' . implode('&', $odataqueries);
         }
@@ -1469,9 +2356,71 @@ class unified extends o365api {
      *
      * @param string $url The file's URL.
      * @return string The file's content.
+     * @deprecated Use get_file_by_url_unauthenticated() instead for Microsoft Graph download URLs.
      */
     public function get_file_by_url(string $url): string {
         return $this->httpclient->download_file($url);
+    }
+
+    /**
+     * Get a file's content by its pre-authenticated download URL.
+     *
+     * This method should be used for Microsoft Graph download URLs (e.g., @microsoft.graph.downloadUrl)
+     * which are pre-authenticated and should NOT include OAuth Bearer tokens.
+     *
+     * Security: This method validates that the URL is from a trusted Microsoft domain before downloading.
+     *
+     * @param string $url The pre-authenticated download URL from Microsoft Graph.
+     * @return string The file's content.
+     * @throws moodle_exception If the URL is not from a trusted Microsoft domain.
+     */
+    public function get_file_by_url_unauthenticated(string $url): string {
+        // Security: Validate URL is from Microsoft Graph domain.
+        $alloweddomains = [
+            'graph.microsoft.com',
+            'microsoftgraph.chinacloudapi.cn',
+            '*.sharepoint.com',
+            '*.sharepoint.cn',
+        ];
+
+        $parsedurl = parse_url($url);
+        if (empty($parsedurl['host'])) {
+            throw new moodle_exception('errorwhiledownload', 'repository_office365');
+        }
+
+        $isallowed = false;
+        foreach ($alloweddomains as $domain) {
+            if (strpos($domain, '*') === 0) {
+                // Wildcard domain (e.g., *.sharepoint.com).
+                $suffix = substr($domain, 1); // Remove the *.
+                if (substr($parsedurl['host'], -strlen($suffix)) === $suffix) {
+                    $isallowed = true;
+                    break;
+                }
+            } else {
+                // Exact domain match.
+                if ($parsedurl['host'] === $domain) {
+                    $isallowed = true;
+                    break;
+                }
+            }
+        }
+
+        if (!$isallowed) {
+            utils::debug('Attempted to download file from untrusted domain.', __METHOD__, ['url' => $url]);
+            throw new moodle_exception('errorwhiledownload', 'repository_office365');
+        }
+
+        // Download without OAuth Bearer token (download URLs are pre-authenticated).
+        $curl = new \curl();
+        $options = ['timeout' => 60, 'followlocation' => true, 'maxredirs' => 5];
+        $result = $curl->get($url, [], $options);
+
+        if ($result === false) {
+            throw new moodle_exception('errorwhiledownload', 'repository_office365');
+        }
+
+        return $result;
     }
 
     /**
@@ -1542,6 +2491,7 @@ class unified extends o365api {
             $expectedparams = ['value' => null];
             $response = $this->process_apicall_response($response, $expectedparams);
         }
+
         return $response;
     }
 
@@ -1555,9 +2505,11 @@ class unified extends o365api {
         if (empty($svc) || !is_array($svc)) {
             return null;
         }
+
         if (!isset($svc['value']) || !isset($svc['value'][0])) {
             return null;
         }
+
         if (isset($svc['value'][0]['oauth2Permissions'])) {
             return $svc['value'][0]['oauth2Permissions'];
         } else if (isset($svc['value'][0]['publishedPermissionScopes'])) {
@@ -1580,6 +2532,7 @@ class unified extends o365api {
         foreach ($graphsp['appRoles'] as $perm) {
             $graphperms[$perm['value']] = $perm;
         }
+
         return $graphperms;
     }
 
@@ -1609,8 +2562,9 @@ class unified extends o365api {
                 break;
             }
         }
+
         if (empty($graphresource)) {
-            throw new moodle_exception('errorunabletofindgraphapi', 'local_o365');;
+            throw new moodle_exception('errorunabletofindgraphapi', 'local_o365');
         }
 
         // Translate to permission information.
@@ -1623,6 +2577,7 @@ class unified extends o365api {
                 }
             }
         }
+
         return $currentperms;
     }
 
@@ -1638,14 +2593,17 @@ class unified extends o365api {
         if (empty($appinfo) || !is_array($appinfo)) {
             return null;
         }
+
         if (!isset($appinfo['value']) || !isset($appinfo['value'][0]) || !isset($appinfo['value'][0]['id'])) {
             return null;
         }
+
         $appobjectid = $appinfo['value'][0]['id'];
         $endpoint = '/oauth2PermissionGrants?$filter=clientId%20eq%20\'' . $appobjectid . '\'';
         if (!empty($resourceid)) {
             $endpoint .= '%20and%20resourceId%20eq%20\'' . $resourceid . '\'';
         }
+
         $response = $this->betaapicall('get', $endpoint);
         return $this->process_apicall_response($response);
     }
@@ -1660,17 +2618,21 @@ class unified extends o365api {
         if (empty($apiinfo) || !is_array($apiinfo)) {
             return null;
         }
+
         if (!isset($apiinfo['value']) || !isset($apiinfo['value'][0]) || !isset($apiinfo['value'][0]['id'])) {
             return null;
         }
+
         $apiobjectid = $apiinfo['value'][0]['id'];
         $permgrants = $this->get_permission_grants($apiobjectid);
         if (empty($permgrants) || !is_array($permgrants)) {
             return null;
         }
+
         if (!isset($permgrants['value']) || !isset($permgrants['value'][0]) || !isset($permgrants['value'][0]['scope'])) {
             return null;
         }
+
         return explode(' ', $permgrants['value'][0]['scope']);
     }
 
@@ -1703,52 +2665,118 @@ class unified extends o365api {
     }
 
     /**
+     * Get the app-only permissions for the graph api that an admin has granted consent to for the application.
+     *
+     * The permissions on the application registration are only what the application asks for. Microsoft only puts a
+     * permission in the application's tokens once an admin has granted consent to it.
+     *
+     * @return array|null The names of the granted permissions as keys, or null if they could not be read.
+     */
+    public function get_graph_granted_apponly_permissions(): ?array {
+        try {
+            $appserviceprincipal = $this->get_application_serviceprincipal_info();
+            $graphserviceprincipal = $this->get_unified_api_serviceprincipal_info();
+            if (empty($appserviceprincipal['value'][0]['id']) || empty($graphserviceprincipal['value'][0]['id'])) {
+                return null;
+            }
+
+            $graphserviceprincipalid = $graphserviceprincipal['value'][0]['id'];
+            $roles = [];
+            foreach ($graphserviceprincipal['value'][0]['appRoles'] as $role) {
+                $roles[$role['id']] = $role['value'];
+            }
+
+            $assignments = $this->paginatedapicall(
+                'get',
+                '/servicePrincipals/' . $appserviceprincipal['value'][0]['id'] . '/appRoleAssignments'
+            );
+        } catch (moodle_exception $e) {
+            \local_o365\utils::debug($e->getMessage(), __METHOD__, $e);
+            return null;
+        }
+
+        $granted = [];
+        foreach ($assignments as $assignment) {
+            if (($assignment['resourceId'] ?? '') === $graphserviceprincipalid && isset($roles[$assignment['appRoleId'] ?? ''])) {
+                $granted[$roles[$assignment['appRoleId']]] = true;
+            }
+        }
+
+        return $granted;
+    }
+
+    /**
      * Check application Graph API permissions.
      *
      * @return array
      */
     public function check_graph_apponly_permissions(): array {
         $this->token->refresh();
-        $requiredperms = $this->get_graph_required_apponly_permissions();
-        $currentperms = $this->get_graph_current_apponly_permissions();
-        $availableperms = $this->get_graph_available_apponly_permissions();
 
+        return $this->find_missing_apponly_permissions(
+            $this->get_graph_required_apponly_permissions(),
+            $this->get_graph_current_apponly_permissions(),
+            $this->get_graph_available_apponly_permissions(),
+            $this->get_graph_granted_apponly_permissions()
+        );
+    }
+
+    /**
+     * Work out which required app-only permissions are missing from the application, or haven't had consent granted.
+     *
+     * @param array $requiredperms The required permissions, each with a list of permissions that are as good.
+     * @param array $currentperms The permissions on the application registration, by name.
+     * @param array $availableperms The permissions Microsoft Graph offers, by name.
+     * @param array|null $grantedperms The permissions that have been granted consent, by name, or null if not known. Consent
+     *                                 isn't checked if it isn't known.
+     * @return array The permissions that are missing, with a description of what's wrong with each as the value.
+     */
+    public function find_missing_apponly_permissions(
+        array $requiredperms,
+        array $currentperms,
+        array $availableperms,
+        ?array $grantedperms = null
+    ): array {
         $missingperms = [];
+        $notgrantedperms = [];
 
         foreach ($requiredperms as $requiredperm => $alternativeperms) {
-            $haspermission = false;
-            if (array_key_exists($requiredperm, $currentperms)) {
-                $haspermission = true;
-            } else {
-                foreach ($alternativeperms as $alternativeperm) {
-                    if (array_key_exists($alternativeperm, $currentperms)) {
-                        $haspermission = true;
-                        break;
-                    }
-                }
-            }
+            $acceptableperms = array_merge([$requiredperm], $alternativeperms);
+            $configuredperms = array_filter($acceptableperms, function ($perm) use ($currentperms) {
+                return array_key_exists($perm, $currentperms);
+            });
 
-            if (!$haspermission) {
+            if (!$configuredperms) {
                 $missingperms[] = $requiredperm;
+            } else if ($grantedperms !== null && !array_intersect($configuredperms, array_keys($grantedperms))) {
+                $notgrantedperms[] = $requiredperm;
             }
         }
 
-        if (empty($missingperms)) {
+        if (empty($missingperms) && empty($notgrantedperms)) {
             return [];
         }
 
-        // Assemble friendly names for permissions.
+        // Assemble friendly names for permissions. App roles have a "displayName", whereas delegated permissions have an
+        // "adminConsentDisplayName".
         $permnames = [];
         foreach ($availableperms as $perminfo) {
-            if (!isset($perminfo['value']) || !isset($perminfo['adminConsentDisplayName'])) {
+            $displayname = $perminfo['displayName'] ?? $perminfo['adminConsentDisplayName'] ?? null;
+            if (!isset($perminfo['value']) || $displayname === null) {
                 continue;
             }
-            $permnames[$perminfo['value']] = $perminfo['adminConsentDisplayName'];
+
+            $permnames[$perminfo['value']] = $displayname;
         }
 
         $missingpermsreturn = [];
         foreach ($missingperms as $missingperm) {
             $missingpermsreturn[$missingperm] = (isset($permnames[$missingperm])) ? $permnames[$missingperm] : $missingperm;
+        }
+
+        foreach ($notgrantedperms as $notgrantedperm) {
+            $name = (isset($permnames[$notgrantedperm])) ? $permnames[$notgrantedperm] : $notgrantedperm;
+            $missingpermsreturn[$notgrantedperm] = $name . ' (' . get_string('settings_verifysetup_notgranted', 'local_o365') . ')';
         }
 
         return $missingpermsreturn;
@@ -1799,6 +2827,7 @@ class unified extends o365api {
             if (!isset($perminfo['value']) || !isset($perminfo['adminConsentDisplayName'])) {
                 continue;
             }
+
             $permnames[$perminfo['value']] = $perminfo['adminConsentDisplayName'];
         }
 
@@ -1808,6 +2837,42 @@ class unified extends o365api {
         }
 
         return $missingpermsreturn;
+    }
+
+    /**
+     * Check whether binary data begins with a known image file-format magic signature.
+     *
+     * Checking the first few magic bytes is orders of magnitude faster than running a
+     * regex over potentially megabytes of photo data, and also provides stronger semantic
+     * validation that the payload is actually an image rather than an error response body.
+     *
+     * Recognised formats: JPEG, PNG, GIF87a/GIF89a, WebP.
+     *
+     * @param string $data Raw binary data to inspect.
+     * @return bool True when $data starts with a recognised image magic signature.
+     */
+    private function is_valid_photo_binary(string $data): bool {
+        if (strlen($data) < 3) {
+            return false;
+        }
+        $header = substr($data, 0, 12);
+        // JPEG: FF D8 FF.
+        if (str_starts_with($header, "\xFF\xD8\xFF")) {
+            return true;
+        }
+        // PNG: 89 50 4E 47 0D 0A 1A 0A.
+        if (str_starts_with($header, "\x89PNG\r\n\x1a\n")) {
+            return true;
+        }
+        // GIF87a / GIF89a.
+        if (str_starts_with($header, 'GIF87a') || str_starts_with($header, 'GIF89a')) {
+            return true;
+        }
+        // WebP: RIFF????WEBP (bytes 0-3 are RIFF, bytes 8-11 are WEBP).
+        if (str_starts_with($header, 'RIFF') && substr($header, 8, 4) === 'WEBP') {
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -1824,7 +2889,7 @@ class unified extends o365api {
         if ($this->check_expected_http_code(['200'])) {
             // Successful response.
             // Return value needs to be binary.
-            if (preg_match('~[^\x20-\x7E\t\r\n]~', $photo) > 0) {
+            if ($this->is_valid_photo_binary($photo)) {
                 // Return value is a valid photo.
                 return $photo;
             } else {
@@ -1915,6 +2980,7 @@ class unified extends o365api {
             if ($curlinstance->errno == 0) {
                 $response = json_decode($response, true);
             }
+
             if (is_array($response) && !empty($response['id'])) {
                 // We can stop now - there is a valid file returned.
                 return $response['id'];
@@ -2044,6 +3110,7 @@ class unified extends o365api {
             if (!empty($result['id'])) {
                 $result['objectId'] = $result['id'];
             }
+
             return $result;
         } catch (moodle_exception $e) {
             return null;
@@ -2131,12 +3198,134 @@ class unified extends o365api {
         if (!$tabname) {
             $tabname = 'Moodle';
         }
+
         $requestparams = ['displayName' => $tabname,
             'teamsApp@odata.bind' => $this->get_apiuri() . '/beta/appCatalogs/teamsApps/' . $appid,
             'configuration' => $tabconfiguration,
         ];
 
         return $this->betaapicall('post', $endpoint, json_encode($requestparams));
+    }
+
+    /**
+     * Create a private channel in a Team, with the given user as its owner.
+     *
+     * @param string $teamobjectid The object ID of the Team.
+     * @param string $displayname The display name of the channel.
+     * @param string $description The description of the channel.
+     * @param string $ownerobjectid The object ID of the user to make the owner of the channel. A private channel cannot be
+     *                              created without an owner, and the user must already be a member of the Team.
+     * @return array|null The created channel, including its ID.
+     * @throws moodle_exception
+     */
+    public function create_private_channel(
+        string $teamobjectid,
+        string $displayname,
+        string $description,
+        string $ownerobjectid
+    ): ?array {
+        $endpoint = '/teams/' . $teamobjectid . '/channels';
+        $data = [
+            '@odata.type' => '#Microsoft.Graph.channel',
+            'membershipType' => 'private',
+            'displayName' => $displayname,
+            'description' => $description,
+            'members' => [
+                [
+                    '@odata.type' => '#microsoft.graph.aadUserConversationMember',
+                    'roles' => ['owner'],
+                    'user@odata.bind' => $this->get_apiuri() . "/v1.0/users('" . $ownerobjectid . "')",
+                ],
+            ],
+        ];
+        $response = $this->apicall('post', $endpoint, json_encode($data));
+
+        return $this->process_apicall_response($response, ['id' => null]);
+    }
+
+    /**
+     * Get the members of a channel.
+     *
+     * @param string $teamobjectid The object ID of the Team.
+     * @param string $channelid The ID of the channel.
+     * @return array The members. Each has the ID of the membership (id), the object ID of the user (userId) and roles.
+     * @throws moodle_exception
+     */
+    public function get_channel_members(string $teamobjectid, string $channelid): array {
+        $endpoint = '/teams/' . $teamobjectid . '/channels/' . rawurlencode($channelid) . '/members';
+
+        return $this->paginatedapicall('get', $endpoint);
+    }
+
+    /**
+     * Add a user to a private channel.
+     *
+     * @param string $teamobjectid The object ID of the Team.
+     * @param string $channelid The ID of the channel.
+     * @param string $userobjectid The object ID of the user. The user must already be a member of the Team.
+     * @param bool $owner Whether to make the user an owner of the channel.
+     * @return array|null The new membership.
+     * @throws moodle_exception
+     */
+    public function add_member_to_channel(
+        string $teamobjectid,
+        string $channelid,
+        string $userobjectid,
+        bool $owner = false
+    ): ?array {
+        $endpoint = '/teams/' . $teamobjectid . '/channels/' . rawurlencode($channelid) . '/members';
+        $data = [
+            '@odata.type' => '#microsoft.graph.aadUserConversationMember',
+            'roles' => $owner ? ['owner'] : [],
+            'user@odata.bind' => $this->get_apiuri() . "/v1.0/users('" . $userobjectid . "')",
+        ];
+        $response = $this->apicall('post', $endpoint, json_encode($data));
+
+        return $this->process_apicall_response($response, ['id' => null]);
+    }
+
+    /**
+     * Change whether a member of a private channel is an owner of it.
+     *
+     * @param string $teamobjectid The object ID of the Team.
+     * @param string $channelid The ID of the channel.
+     * @param string $membershipid The ID of the membership, as returned by get_channel_members().
+     * @param bool $owner Whether the member should be an owner of the channel.
+     * @return array|null The updated membership.
+     * @throws moodle_exception
+     */
+    public function update_channel_member_role(
+        string $teamobjectid,
+        string $channelid,
+        string $membershipid,
+        bool $owner
+    ): ?array {
+        $endpoint = '/teams/' . $teamobjectid . '/channels/' . rawurlencode($channelid) . '/members/' .
+            rawurlencode($membershipid);
+        $data = [
+            '@odata.type' => '#microsoft.graph.aadUserConversationMember',
+            'roles' => $owner ? ['owner'] : [],
+        ];
+        $response = $this->apicall('patch', $endpoint, json_encode($data));
+
+        return $this->process_apicall_response($response, ['id' => null]);
+    }
+
+    /**
+     * Remove a member from a private channel.
+     *
+     * @param string $teamobjectid The object ID of the Team.
+     * @param string $channelid The ID of the channel.
+     * @param string $membershipid The ID of the membership, as returned by get_channel_members().
+     * @return bool Whether the member was removed.
+     * @throws moodle_exception
+     */
+    public function remove_member_from_channel(string $teamobjectid, string $channelid, string $membershipid): bool {
+        $endpoint = '/teams/' . $teamobjectid . '/channels/' . rawurlencode($channelid) . '/members/' .
+            rawurlencode($membershipid);
+        $this->apicall('delete', $endpoint);
+
+        return $this->check_expected_http_code(['204']);
     }
 
     /**
@@ -2187,6 +3376,279 @@ class unified extends o365api {
         } catch (moodle_exception $e) {
             return false;
         }
+    }
+
+    /**
+     * Get timezones for multiple users using batch requests.
+     * Microsoft Graph allows up to 20 requests per batch.
+     *
+     * @param array $objectids Array of Azure AD object IDs (GUIDs)
+     * @return array Associative array with objectid as key and timezone data as value
+     */
+    public function get_timezones_batch(array $objectids): array {
+        if (empty($objectids)) {
+            return [];
+        }
+
+        $results = [];
+        $chunks = array_chunk($objectids, 20); // Max 20 requests per batch.
+
+        foreach ($chunks as $chunk) {
+            $batchrequests = [];
+            $idtoobjectidmap = [];
+
+            // Pre-initialise every objectid to false so that objectids absent from
+            // the batch response (partial API failure) are treated as "no timezone"
+            // rather than silently skipped by the caller's isset() / empty() branch.
+            foreach ($chunk as $objectid) {
+                $results[$objectid] = false;
+            }
+
+            // Build batch request.
+            foreach ($chunk as $index => $objectid) {
+                $requestid = (string)($index + 1);
+                $idtoobjectidmap[$requestid] = $objectid;
+                $batchrequests[] = [
+                    'id' => $requestid,
+                    'method' => 'GET',
+                    'url' => '/users/' . urlencode($objectid) . '/mailboxSettings/timeZone',
+                ];
+            }
+
+            // Make batch request.
+            try {
+                $batchpayload = ['requests' => $batchrequests];
+                $response = $this->betaapicall('post', '/$batch', json_encode($batchpayload));
+                $batchresponse = $this->process_apicall_response($response, ['responses' => null]);
+
+                if (!empty($batchresponse['responses']) && is_array($batchresponse['responses'])) {
+                    foreach ($batchresponse['responses'] as $individualresponse) {
+                        $requestid = $individualresponse['id'];
+                        $objectid = $idtoobjectidmap[$requestid];
+
+                        if ($individualresponse['status'] === 200 && !empty($individualresponse['body'])) {
+                            $results[$objectid] = $individualresponse['body'];
+                        } else {
+                            // Request failed or returned non-200 status.
+                            $results[$objectid] = false;
+                        }
+                    }
+                }
+            } catch (moodle_exception $e) {
+                // Batch call itself failed; pre-initialisation above already set all
+                // objectids in this chunk to false, so no additional work needed here.
+                debugging('Batch timezone request failed: ' . $e->getMessage(), DEBUG_DEVELOPER);
+            }
+        }
+
+        return $results;
+    }
+
+    /**
+     * Get profile photos for multiple users using batch requests.
+     * Microsoft Graph allows up to 20 requests per batch.
+     *
+     * @param array $upns Array of user principal names
+     * @return array Associative array with UPN as key and status array as value.
+     *         Each status array contains:
+     *         - 'status' (string): One of:
+     *           - 'success': Photo fetched successfully (data contains binary photo)
+     *           - 'not_found': No photo in Office 365 (HTTP 404)
+     *           - 'error': API error (permissions, rate limit, server error, etc.)
+     *           - 'invalid_data': Photo data failed validation (not a valid image)
+     *           - 'batch_error': Batch request failed or UPN not in response
+     *         - 'data' (string|false): Binary photo data on success, false otherwise
+     *         - 'http_status' (int|null): HTTP status code from API response, null if batch error
+     */
+    public function get_photos_batch(array $upns): array {
+        if (empty($upns)) {
+            return [];
+        }
+
+        $results = [];
+        $chunks = array_chunk($upns, 20); // Max 20 requests per batch.
+
+        foreach ($chunks as $chunk) {
+            $batchrequests = [];
+            $idtoupnmap = [];
+
+            // Pre-initialise every UPN with status info. UPNs absent from the batch
+            // response (partial API failure) are marked as 'batch_error'.
+            foreach ($chunk as $upn) {
+                $results[$upn] = [
+                    'status' => 'batch_error',
+                    'data' => false,
+                    'http_status' => null,
+                ];
+            }
+
+            // Build batch request.
+            foreach ($chunk as $index => $upn) {
+                $requestid = (string)($index + 1);
+                $idtoupnmap[$requestid] = $upn;
+                $batchrequests[] = [
+                    'id' => $requestid,
+                    'method' => 'GET',
+                    'url' => '/users/' . urlencode($upn) . '/photo/$value',
+                ];
+            }
+
+            // Make batch request.
+            try {
+                $batchpayload = ['requests' => $batchrequests];
+                $response = $this->betaapicall('post', '/$batch', json_encode($batchpayload));
+                $batchresponse = $this->process_apicall_response($response, ['responses' => null]);
+
+                if (!empty($batchresponse['responses']) && is_array($batchresponse['responses'])) {
+                    foreach ($batchresponse['responses'] as $individualresponse) {
+                        $requestid = $individualresponse['id'];
+                        $upn = $idtoupnmap[$requestid];
+                        $httpstatus = $individualresponse['status'] ?? null;
+
+                        if ($httpstatus === 200 && !empty($individualresponse['body'])) {
+                            // Graph batch responses encode binary content as base64 in the JSON envelope.
+                            $binarydata = base64_decode($individualresponse['body'], true);
+                            if ($binarydata !== false && $this->is_valid_photo_binary($binarydata)) {
+                                $results[$upn] = [
+                                    'status' => 'success',
+                                    'data' => $binarydata,
+                                    'hash' => hash('sha256', $binarydata),
+                                    'http_status' => $httpstatus,
+                                ];
+                            } else {
+                                // Decoded data is not valid binary image data.
+                                $results[$upn] = [
+                                    'status' => 'invalid_data',
+                                    'data' => false,
+                                    'http_status' => $httpstatus,
+                                ];
+                            }
+                        } else if ($httpstatus === 404) {
+                            // No photo found for this user (legitimate case).
+                            $results[$upn] = [
+                                'status' => 'not_found',
+                                'data' => false,
+                                'http_status' => $httpstatus,
+                            ];
+                        } else {
+                            // Other error (permission denied, rate limited, server error, etc).
+                            $results[$upn] = [
+                                'status' => 'error',
+                                'data' => false,
+                                'http_status' => $httpstatus,
+                            ];
+                        }
+                    }
+                }
+            } catch (moodle_exception $e) {
+                // Batch call itself failed; pre-initialisation above already set all
+                // UPNs in this chunk to batch_error status.
+                debugging('Batch photo request failed: ' . $e->getMessage(), DEBUG_DEVELOPER);
+            }
+        }
+
+        return $results;
+    }
+
+    /**
+     * Get transitive members and owners for multiple groups using batch requests.
+     *
+     * Groups whose member or owner list doesn't fit in a single page fall back to the
+     * paginated single-group calls.
+     *
+     * @param array $groupoids Array of Microsoft group object IDs.
+     * @return array Associative array keyed by group object ID, each value:
+     *         - 'members' (array|null): transitive user members (id only), or null if not fetched.
+     *         - 'owners' (array|null): group owners, or null if not fetched.
+     *         - 'error' (string|null): error message if the group's data could not be fetched.
+     */
+    public function get_groups_owners_and_members_batch(array $groupoids): array {
+        if (empty($groupoids)) {
+            return [];
+        }
+
+        $results = [];
+        foreach ($groupoids as $groupoid) {
+            $results[$groupoid] = ['members' => null, 'owners' => null, 'error' => null];
+        }
+
+        $chunks = array_chunk($groupoids, self::GROUPS_PER_BATCH_REQUEST);
+
+        foreach ($chunks as $chunk) {
+            $batchrequests = [];
+            $requestmap = [];
+
+            // Build batch request.
+            foreach ($chunk as $index => $groupoid) {
+                $membersrequestid = 'members_' . $index;
+                $ownersrequestid = 'owners_' . $index;
+                $requestmap[$membersrequestid] = ['groupoid' => $groupoid, 'type' => 'members'];
+                $requestmap[$ownersrequestid] = ['groupoid' => $groupoid, 'type' => 'owners'];
+
+                $batchrequests[] = [
+                    'id' => $membersrequestid,
+                    'method' => 'GET',
+                    'url' => '/groups/' . $groupoid . '/transitiveMembers/microsoft.graph.user?$select=id&$top=999',
+                ];
+                $batchrequests[] = [
+                    'id' => $ownersrequestid,
+                    'method' => 'GET',
+                    'url' => '/groups/' . $groupoid . '/owners?$top=999',
+                ];
+            }
+
+            // Make batch request.
+            try {
+                $batchpayload = ['requests' => $batchrequests];
+                $response = $this->betaapicall('post', '/$batch', json_encode($batchpayload));
+                $batchresponse = $this->process_apicall_response($response, ['responses' => null]);
+
+                if (!empty($batchresponse['responses']) && is_array($batchresponse['responses'])) {
+                    foreach ($batchresponse['responses'] as $individualresponse) {
+                        $requestid = $individualresponse['id'] ?? null;
+                        if (!isset($requestmap[$requestid])) {
+                            continue;
+                        }
+
+                        $groupoid = $requestmap[$requestid]['groupoid'];
+                        $type = $requestmap[$requestid]['type'];
+                        $httpstatus = $individualresponse['status'] ?? null;
+                        $body = $individualresponse['body'] ?? [];
+
+                        if ($httpstatus === 200) {
+                            $values = (!empty($body['value']) && is_array($body['value'])) ? $body['value'] : [];
+
+                            // The page is incomplete, so discard it and refetch with paging. The refetch
+                            // gets its own try so that one group's failure doesn't abort the rest of the batch.
+                            if (!empty($body['@odata.nextLink'])) {
+                                try {
+                                    $values = ($type === 'members')
+                                        ? $this->get_transitive_group_members($groupoid)
+                                        : $this->get_group_owners($groupoid);
+                                } catch (moodle_exception $e) {
+                                    $results[$groupoid]['error'] = $e->getMessage();
+                                    continue;
+                                }
+                            }
+
+                            $results[$groupoid][$type] = $values;
+                        } else {
+                            $errormessage = $body['error']['message'] ?? "HTTP $httpstatus";
+                            $results[$groupoid]['error'] = $errormessage;
+                        }
+                    }
+                }
+            } catch (moodle_exception $e) {
+                // Batch call itself failed; mark every group in this chunk as errored so callers
+                // don't mistake a transient failure for an empty group.
+                foreach ($chunk as $groupoid) {
+                    $results[$groupoid]['error'] = $e->getMessage();
+                }
+                utils::debug('Batch group owners/members request failed: ' . $e->getMessage(), __METHOD__, $e);
+            }
+        }
+
+        return $results;
     }
 
     /**
@@ -2307,11 +3769,18 @@ class unified extends o365api {
      * @param string $description
      * @param string $externalid
      * @param string $externalname
+     * @param array|null $extra
      * @return array|null
      * @throws moodle_exception
      */
-    public function create_educationclass_group(string $displayname, string $mailnickname, string $description, string $externalid,
-        string $externalname): ?array {
+    public function create_educationclass_group(
+        string $displayname,
+        string $mailnickname,
+        string $description,
+        string $externalid,
+        string $externalname,
+        ?array $extra = null
+    ): ?array {
         if (!empty($mailnickname)) {
             $mailnickname = core_text::strtolower($mailnickname);
             $mailnickname = preg_replace('/[^a-z0-9_]+/iu', '', $mailnickname);
@@ -2332,6 +3801,13 @@ class unified extends o365api {
             'mailNickname' => $mailnickname,
         ];
 
+        if (!empty($extra)) {
+            // Set extra parameters.
+            foreach ($extra as $extraname => $value) {
+                $groupdata[$extraname] = $value;
+            }
+        }
+
         // Description cannot be set and empty.
         if (empty($groupdata['description'])) {
             unset($groupdata['description']);
@@ -2348,7 +3824,14 @@ class unified extends o365api {
             $expectedexception = 'Another object with the same value for property mailNickname already exists.';
             if ($e->a == $expectedexception) {
                 $mailnickname .= '_' . sprintf('%04d', random_int(0, 9999));
-                return $this->create_educationclass_group($displayname, $mailnickname, $description, $externalid, $externalname);
+                return $this->create_educationclass_group(
+                    $displayname,
+                    $mailnickname,
+                    $description,
+                    $externalid,
+                    $externalname,
+                    $extra
+                );
             } else {
                 utils::debug($e->getMessage(), __METHOD__, $e);
                 throw $e;
@@ -2429,6 +3912,20 @@ class unified extends o365api {
             'template@odata.bind' => "https://graph.microsoft.com/v1.0/teamsTemplates('" . $template . "')",
             'group@odata.bind' => "https://graph.microsoft.com/v1.0/groups('" . $groupobjectid . "')",
         ];
+
+        // For education templates, set proper teamDefinition to match template specialization.
+        // Specialization must use PascalCase: 'EducationClass', 'EducationStaff', etc.
+        $specializationmap = [
+            'educationClass' => 'EducationClass',
+            'educationStaff' => 'EducationStaff',
+            'educationProfessionalLearningCommunity' => 'EducationProfessionalLearningCommunity',
+        ];
+        if (isset($specializationmap[$template])) {
+            $teamparams['teamDefinition'] = [
+                'specialization' => $specializationmap[$template],
+            ];
+        }
+
         $response = $this->apicall('post', $endpoint, json_encode($teamparams));
 
         if ($this->check_expected_http_code(['202'])) {
@@ -2436,6 +3933,278 @@ class unified extends o365api {
         } else {
             return $this->process_apicall_response($response);
         }
+    }
+
+    /**
+     * Create a team directly from a template without requiring a pre-existing group.
+     *
+     * @param string $displayname Team display name
+     * @param string $description Team description
+     * @param string $template Template ID (e.g., 'educationProfessionalLearningCommunity')
+     * @param array|null $owneruserids Array of owner user object IDs (required for application context)
+     * @return array|bool Response from the API
+     * @throws moodle_exception
+     */
+    public function create_team_from_template(
+        string $displayname,
+        string $description,
+        string $template = 'standard',
+        ?array $owneruserids = null
+    ) {
+        $endpoint = '/teams';
+
+        $teamparams = [
+            'template@odata.bind' => "https://graph.microsoft.com/v1.0/teamsTemplates('" . $template . "')",
+            'displayName' => $displayname,
+        ];
+
+        if (!empty($description)) {
+            $teamparams['description'] = $description;
+        }
+
+        // Add owners to the team. At least one owner is required for application context.
+        if (!empty($owneruserids)) {
+            $members = [];
+            foreach ($owneruserids as $userid) {
+                $members[] = [
+                    '@odata.type' => '#microsoft.graph.aadUserConversationMember',
+                    'roles' => ['owner'],
+                    'user@odata.bind' => "https://graph.microsoft.com/v1.0/users/{$userid}",
+                ];
+            }
+            if (!empty($members)) {
+                $teamparams['members'] = $members;
+            }
+        }
+
+        $response = $this->apicall('post', $endpoint, json_encode($teamparams));
+
+        if ($this->check_expected_http_code(['202'])) {
+            return true;
+        } else {
+            return $this->process_apicall_response($response);
+        }
+    }
+
+    /**
+     * Validate if a Teams template ID exists.
+     *
+     * @param string $template The template ID to validate.
+     * @return bool True if template exists, false otherwise.
+     * @throws moodle_exception If there's an API error (authentication, permission, server error, etc).
+     */
+    public function validate_teams_template(string $template): bool {
+        $endpoint = '/teamwork/teamTemplates';
+        $response = $this->betaapicall('get', $endpoint);
+
+        $httpclientinfo = (array) $this->httpclient->info;
+        $httpcode = $httpclientinfo['http_code'] ?? 0;
+
+        if ($httpcode === 200) {
+            // Parse the response to check if the template ID exists in the list.
+            $templates = $this->process_apicall_response($response, ['value' => null]);
+            if (isset($templates['value']) && is_array($templates['value'])) {
+                foreach ($templates['value'] as $tmpl) {
+                    if (isset($tmpl['id']) && $tmpl['id'] === $template) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        } else if ($httpcode === 403 || $httpcode === 401) {
+            throw new moodle_exception(
+                'erroro365apibadcall_message',
+                'local_o365',
+                '',
+                'Permission denied: Check Office 365 API permissions.'
+            );
+        } else {
+            // For other errors (400, 5xx, etc), process the response to extract error details.
+            return $this->process_apicall_response($response);
+        }
+    }
+
+    /**
+     * Get the async operation location header from the last HTTP response.
+     *
+     * @return string|null The location URL or null if not found.
+     */
+    public function get_last_async_operation_location(): ?string {
+        // Get raw response headers from the curl client.
+        $rawheaders = $this->httpclient->get_raw_response();
+        if (empty($rawheaders) || !is_array($rawheaders)) {
+            return null;
+        }
+
+        // Parse the Location header from raw response headers.
+        foreach ($rawheaders as $header) {
+            $headerline = trim($header);
+            if (stripos($headerline, 'location:') === 0) {
+                // Extract the URL after "Location: ".
+                $location = trim(substr($headerline, 9));
+                if (!empty($location)) {
+                    return $location;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Get the status of a team creation async operation.
+     *
+     * @param string $operationid The operation ID.
+     * @return array|null Operation status array with 'id', 'status', 'targetResourceId' keys, or null on error.
+     * @throws moodle_exception
+     */
+    public function get_async_operation_status(string $operationid): ?array {
+        try {
+            $endpoint = "/teams/operations/{$operationid}";
+            utils::debug("Getting operation status from endpoint: {$endpoint}", __METHOD__);
+            $response = $this->apicall('get', $endpoint);
+            utils::debug("Operation status response: " . substr($response, 0, 200), __METHOD__);
+            return $this->process_apicall_response($response);
+        } catch (moodle_exception $e) {
+            utils::debug("Failed to get async operation status: " . $e->getMessage(), __METHOD__);
+            return null;
+        }
+    }
+
+    /**
+     * Wait for a team creation async operation to complete using the operation URL, with timeout.
+     *
+     * Polls the operation status up to 20 times with 2-second intervals (~40 seconds maximum wait).
+     * The URL from the Location header is used directly for polling.
+     *
+     * @param string $operationurl The async operation URL from the Location header.
+     * @param callable|null $pollcallback Optional callback function called for each poll: callback(int $pollcount, string $state).
+     * @return string|null The target resource ID (group/team ID) on success, null on timeout.
+     * @throws moodle_exception
+     */
+    public function wait_for_async_operation_by_url(string $operationurl, ?callable $pollcallback = null): ?string {
+        $maxwait = 120; // 2 minutes.
+        $maxpolls = 20;
+        $pollinterval = 2; // 2 seconds between polls.
+        $elapsed = 0;
+        $pollcount = 0;
+
+        while ($pollcount < $maxpolls && $elapsed < $maxwait) {
+            $pollcount++;
+            $statusinfo = $this->get_async_operation_status_by_url($operationurl, true);
+            if (!$statusinfo || !is_array($statusinfo) || !isset($statusinfo['status'])) {
+                $state = isset($statusinfo['error']) ? 'error: ' . $statusinfo['error'] : 'failed to get status';
+                utils::debug("Poll #{$pollcount}/{$maxpolls}: {$state}", __METHOD__);
+                if ($pollcallback) {
+                    $pollcallback($pollcount, $state);
+                }
+                sleep($pollinterval);
+                $elapsed += $pollinterval;
+                continue;
+            }
+
+            $status = $statusinfo;
+
+            $state = $status['status'] ?? null;
+            utils::debug("Poll #{$pollcount}/{$maxpolls}: Operation state = {$state}", __METHOD__);
+            if ($pollcallback) {
+                $pollcallback($pollcount, $state);
+            }
+
+            if ($state === 'succeeded') {
+                $targetid = $status['targetResourceId'] ?? null;
+                utils::debug("Poll #{$pollcount}/{$maxpolls}: Operation succeeded with target ID: {$targetid}", __METHOD__);
+                return $targetid;
+            } else if ($state === 'failed') {
+                $error = $status['error'] ?? 'Unknown error';
+                throw new moodle_exception('teamsasyncfailed', 'local_o365', '', $error);
+            } else if ($state === 'notStarted' || $state === 'inProgress') {
+                sleep($pollinterval);
+                $elapsed += $pollinterval;
+                continue;
+            } else {
+                throw new moodle_exception('unknownasyncstate', 'local_o365', '', $state);
+            }
+        }
+
+        // Timeout.
+        utils::debug("Poll timeout after {$pollcount} polls ({$elapsed}s, max {$maxwait}s)", __METHOD__);
+        return null;
+    }
+
+    /**
+     * Get the status of a team creation async operation using the operation URL.
+     *
+     * @param string $operationurl The operation URL from the Location header (relative path).
+     * @param bool $returnerror If true, return error info in result.
+     * @return array|null Operation status array with 'id', 'status', 'targetResourceId' keys, or array with 'error' key on error.
+     * @throws moodle_exception
+     */
+    public function get_async_operation_status_by_url(string $operationurl, bool $returnerror = false): ?array {
+        try {
+            utils::debug("Getting operation status from URL: {$operationurl}", __METHOD__);
+            // Use apicall() to leverage token refresh, throttling, and region-specific Graph endpoints.
+            $response = $this->apicall('get', $operationurl);
+            utils::debug("Operation status response: " . substr($response, 0, 200), __METHOD__);
+            return $this->process_apicall_response($response);
+        } catch (moodle_exception $e) {
+            $errormsg = $e->getMessage();
+            utils::debug("Failed to get async operation status. Error: {$errormsg}", __METHOD__);
+            if ($returnerror) {
+                return ['error' => $errormsg];
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Wait for a team creation async operation to complete, with timeout.
+     *
+     * Polls the operation status every 2 seconds up to a maximum of 5 minutes.
+     *
+     * @param string $operationid The async operation ID.
+     * @return string|null The target resource ID (group/team ID) on success, null on timeout.
+     * @throws moodle_exception
+     */
+    public function wait_for_async_operation(string $operationid): ?string {
+        $maxwait = 300; // 5 minutes.
+        $pollinterval = 2;
+        $elapsed = 0;
+        $pollcount = 0;
+
+        while ($elapsed < $maxwait) {
+            $pollcount++;
+            $status = $this->get_async_operation_status($operationid);
+            if (!$status) {
+                utils::debug("Poll #{$pollcount}: Failed to get operation status", __METHOD__);
+                // Don't return null immediately - keep polling, the API might be temporarily unavailable.
+                sleep($pollinterval);
+                $elapsed += $pollinterval;
+                continue;
+            }
+
+            $state = $status['status'] ?? null;
+            utils::debug("Poll #{$pollcount}: Operation state = {$state}", __METHOD__);
+
+            if ($state === 'succeeded') {
+                $targetid = $status['targetResourceId'] ?? null;
+                utils::debug("Poll #{$pollcount}: Operation succeeded with target ID: {$targetid}", __METHOD__);
+                return $targetid;
+            } else if ($state === 'failed') {
+                $error = $status['error'] ?? 'Unknown error';
+                throw new moodle_exception('teamsasyncfailed', 'local_o365', '', $error);
+            } else if ($state === 'notStarted' || $state === 'inProgress') {
+                sleep($pollinterval);
+                $elapsed += $pollinterval;
+                continue;
+            } else {
+                throw new moodle_exception('unknownasyncstate', 'local_o365', '', $state);
+            }
+        }
+
+        // Timeout.
+        utils::debug("Poll timeout after {$pollcount} polls ({$elapsed}s)", __METHOD__);
+        return null;
     }
 
     /**

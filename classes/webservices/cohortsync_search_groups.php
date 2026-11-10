@@ -26,13 +26,19 @@
 
 namespace local_o365\webservices;
 
+use core\context\system;
+
 defined('MOODLE_INTERNAL') || die();
 
 global $CFG;
 require_once($CFG->libdir . '/externallib.php');
 
+/**
+ * Class cohortsync_search_groups.
+ *
+ * @package local_o365\webservices
+ */
 class cohortsync_search_groups extends \external_api {
-
     /**
      * Parameters for search_groups.
      *
@@ -40,56 +46,67 @@ class cohortsync_search_groups extends \external_api {
      */
     public static function search_groups_parameters() {
         return new \external_function_parameters([
-                'query' => new \external_value(PARAM_TEXT, 'Search query', VALUE_REQUIRED),
+            'query' => new \external_value(PARAM_TEXT, 'Search query', VALUE_REQUIRED),
+            'offset' => new \external_value(PARAM_INT, 'Pagination offset', VALUE_DEFAULT, 0),
+            'limit' => new \external_value(PARAM_INT, 'Maximum results per page', VALUE_DEFAULT, 20),
         ]);
     }
 
     /**
-     * Search Microsoft 365 groups using existing cache functions.
+     * Search Microsoft 365 groups using the local cache table.
+     *
+     * Filtering, sorting, and paging are all performed in SQL so only the
+     * requested page is transferred from the database.
      *
      * @param string $query The search query.
-     * @return array Groups matching the query, excluding already mapped ones.
+     * @param int $offset Pagination offset.
+     * @param int $limit Maximum results per page.
+     * @return array Results page and whether more exist.
      */
-    public static function search_groups($query) {
+    public static function search_groups($query, $offset = 0, $limit = 20) {
         global $DB;
 
-        $params = self::validate_parameters(self::search_groups_parameters(), ['query' => $query]);
+        $params = self::validate_parameters(self::search_groups_parameters(), [
+            'query' => $query,
+            'offset' => $offset,
+            'limit' => $limit,
+        ]);
 
-        self::validate_context(\context_system::instance());
-        require_capability('moodle/site:config', \context_system::instance());
+        self::validate_context(system::instance());
+        require_capability('moodle/site:config', system::instance());
 
-        $apiclient = \local_o365\feature\cohortsync\main::get_unified_api(__METHOD__);
-        if (empty($apiclient)) {
-            throw new \moodle_exception('cohortsync_unifiedapierror', 'local_o365');
-        }
-        $cohortsyncmain = new \local_o365\feature\cohortsync\main($apiclient);
-        $cohortsyncmain->fetch_groups_from_cache();
-        $allgroups = $cohortsyncmain->get_grouplist();
+        $query = trim($params['query']);
+        $offset = max(0, $params['offset']);
+        $limit = min(max(1, $params['limit']), 50);
 
-        // Get mapped to exclude
-        $mappedgroupoids = [];
-        $mappings = $DB->get_records('local_o365_objects', ['type' => 'group', 'subtype' => 'cohort'], '', 'objectid');
-        foreach ($mappings as $mapping) {
-            $mappedgroupoids[] = $mapping->objectid;
+        if (strlen($query) < 2) {
+            return ['results' => [], 'hasmore' => false];
         }
 
-        // Filter in PHP
-        $result = [];
-        foreach ($allgroups as $group) {
-            if (!in_array($group['id'], $mappedgroupoids) && stripos($group['displayName'], $params['query']) !== false) {
-                $result[] = [
-                        'id' => $group['id'],
-                        'displayName' => $group['displayName'],
-                ];
-            }
-        }
+        $likename = $DB->sql_like('name', ':query', false, false);
+        $sqlparams = ['query' => '%' . $DB->sql_like_escape($query) . '%'];
 
-        usort($result, function($a, $b) {
-            return strcasecmp($a['displayName'], $b['displayName']);
-        });
-        $result = array_slice($result, 0, 30);
+        $sql = "SELECT objectid AS id, name AS displayname
+                  FROM {local_o365_groups_cache}
+                 WHERE not_found_since = 0
+                   AND $likename
+                   AND objectid NOT IN (
+                       SELECT objectid
+                         FROM {local_o365_objects}
+                        WHERE type = 'group' AND subtype = 'cohort'
+                   )
+                 ORDER BY name";
 
-        return $result;
+        // Fetch one extra row to detect whether a further page exists.
+        $records = array_values($DB->get_records_sql($sql, $sqlparams, $offset, $limit + 1));
+        $hasmore = count($records) > $limit;
+        $page = array_slice($records, 0, $limit);
+
+        $results = array_map(function ($r) {
+            return ['id' => $r->id, 'displayName' => $r->displayname];
+        }, $page);
+
+        return ['results' => $results, 'hasmore' => $hasmore];
     }
 
     /**
@@ -98,11 +115,14 @@ class cohortsync_search_groups extends \external_api {
      * @return \external_description
      */
     public static function search_groups_returns() {
-        return new \external_multiple_structure(
+        return new \external_single_structure([
+            'results' => new \external_multiple_structure(
                 new \external_single_structure([
-                        'id' => new \external_value(PARAM_TEXT, 'Group ID'),
-                        'displayName' => new \external_value(PARAM_TEXT, 'Group display name'),
+                    'id' => new \external_value(PARAM_TEXT, 'Group ID'),
+                    'displayName' => new \external_value(PARAM_TEXT, 'Group display name'),
                 ])
-        );
+            ),
+            'hasmore' => new \external_value(PARAM_BOOL, 'Whether more results exist beyond this page'),
+        ]);
     }
 }

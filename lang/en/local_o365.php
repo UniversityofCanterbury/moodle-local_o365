@@ -32,8 +32,11 @@ defined('MOODLE_INTERNAL') || die();
 $string['pluginname'] = 'Microsoft 365 Integration';
 
 // Settings - tabs.
+$string['settings_pageheading'] = '{$a} configuration';
 $string['settings_header_setup'] = 'Setup';
 $string['settings_header_syncsettings'] = 'Sync Settings';
+$string['settings_header_usersync'] = 'User Sync';
+$string['settings_header_coursesync'] = 'Course Sync';
 $string['settings_header_advanced'] = 'Advanced';
 $string['settings_header_sds'] = 'SDS sync';
 $string['settings_header_teams'] = 'Teams Settings';
@@ -59,7 +62,6 @@ $string['settings_setup_step3_desc'] = 'Setup is complete. Click the "Update" bu
 // Settings in "Step 2/2" section of the "Setup" tab.
 $string['settings_adminconsent'] = 'Admin Consent';
 $string['settings_adminconsent_btn'] = 'Provide Admin Consent';
-$string['settings_adminconsent_error_53003'] = 'A known issue has happened when providing admin consent, which only applies to Microsoft identity platform (v2.0) IdP type. As a result, the integration cannot detect Microsoft Entra tenant and OneDrive for Business URL settings below automatically. Please set these values manually.';
 $string['settings_adminconsent_details'] = 'To allow access to some of the permissions needed, an administrator will need to provide admin consent. Click this button, then log in with a Microsoft Entra ID administrator account to provide consent. This will need to be done whenever you change "Admin" permissions in Entra ID.';
 $string['settings_entratenant'] = 'Microsoft Entra tenant';
 $string['settings_entratenant_details'] = 'Used to Identify your organization within Microsoft. For example: "contoso.onmicrosoft.com".<br/>
@@ -99,6 +101,7 @@ $string['settings_verifysetup_detectedval'] = 'Detected Value:';
 $string['settings_verifysetup_update'] = 'Update';
 $string['settings_verifysetup_checking'] = 'Checking...';
 $string['settings_verifysetup_missingappperms'] = 'Missing Application Permissions:';
+$string['settings_verifysetup_notgranted'] = 'added to the application, but admin consent has not been granted';
 $string['settings_verifysetup_missingperms'] = 'Missing Delegated Permissions:';
 $string['settings_verifysetup_permscorrect'] = 'Delegated Permissions are correct.';
 $string['settings_verifysetup_errorcheck'] = 'An error occurred trying to check setup.';
@@ -131,8 +134,6 @@ $string['settings_detectperms_valid'] = 'Permissions have been set up.';
 $string['settings_detectperms_invalid'] = 'Check permissions in Microsoft Entra ID';
 
 // Settings in "User sync" section of the "Sync settings" tab.
-$string['settings_options_usersync'] = 'User Sync';
-$string['settings_options_usersync_desc'] = 'The following settings control user synchronization between Microsoft 365 and Moodle.';
 $string['settings_usersync_general'] = 'General user synchronization';
 $string['settings_usersync_suspension'] = 'Moodle account suspension';
 $string['settings_usersync_matching'] = 'User matching';
@@ -145,7 +146,10 @@ $string['settings_usersync_update'] = 'Update accounts in Moodle for users in Mi
 $string['settings_usersync_suspend'] = 'Suspend previously synced accounts in Moodle when they are deleted from Microsoft Entra ID';
 $string['settings_usersync_delete'] = 'Delete previously synced accounts in Moodle when they are deleted from Microsoft Entra ID';
 $string['settings_usersync_reenable'] = 'Re-enable suspended accounts for users in Microsoft Entra ID';
-$string['settings_usersync_disabledsync'] = 'Sync disabled status';
+$string['settings_usersync_disabledsyncsuspend'] = 'Suspend accounts in Moodle when disabled in Microsoft Entra ID';
+$string['settings_usersync_disabledsyncreenable'] = 'Re-enable accounts in Moodle when re-enabled in Microsoft Entra ID';
+$string['settings_usersync_suspendnolink'] = 'Suspend connected accounts that have no stored Microsoft link when they are deleted from or disabled in Microsoft Entra ID';
+$string['settings_usersync_groupsyncsuspend'] = 'Suspend accounts in Moodle when not in the configured user sync group';
 $string['settings_usersync_match'] = 'Match preexisting Moodle users with same-named accounts in Microsoft Entra ID';
 $string['settings_usersync_matchswitchauth'] = 'Switch matched users to Microsoft 365 (OpenID Connect) authentication';
 $string['settings_usersync_appassign'] = 'Assign users to application during sync';
@@ -158,6 +162,8 @@ $string['settings_addsync_tzsynconlogin'] = 'Sync Outlook timezone to Moodle on 
 $string['settings_usersync_guestsync'] = 'Sync guest users';
 $string['settings_suspend_delete_running_time'] = 'User suspension/deletion running time';
 $string['settings_suspend_delete_running_time_desc'] = 'If the option is enabled, suspension/delete feature of user sync function will run once a day, at the time configured in the Moodle instance default time zone.';
+$string['settings_usersync_delete_delay'] = 'Delay before deleting suspended users';
+$string['settings_usersync_delete_delay_desc'] = 'The minimum time a user must stay suspended in Moodle before the user sync deletes the account. This applies on top of Microsoft Entra ID\'s soft-delete retention period, so deletion never happens earlier than that. Set to 0 to delete as soon as the Microsoft Entra ID retention period has ended. Users who were already suspended before this setting was introduced are counted from the first user sync run that finds them.';
 $string['settings_support_user_identifier_change'] = 'Support Microsoft account binding username claim value change';
 $string['settings_support_user_identifier_change_desc'] = 'If enabled, Moodle will try to react when the binding username claim value, which is normally UPN, of a Microsoft account that is connected to a Moodle account is changed.</br>
 <table class="flexible table table-striped table-hover generaltable generalbox table-sm">
@@ -292,12 +298,49 @@ $string['settings_coursesync_details'] = 'If enabled, this will create and maint
 $string['acp_coursesynccustom_off'] = 'Disabled<br />Disable Teams creation for all courses.';
 $string['acp_coursesynccustom_oncustom'] = 'Customize<br />Allows authorized users to select which courses to create Teams for.<br> <span id="adminsetting_coursesync" style="font-weight: bold"><a href="{$a}">Customize course sync</a></span>';
 $string['acp_coursesynccustom_onall'] = 'All Features Enabled<br />Enables Teams creation for all courses.';
+$string['settings_coursesync_sync_hidden_courses'] = 'Sync hidden courses';
+$string['settings_coursesync_sync_hidden_courses_desc'] = 'By default, the plugin ignores hidden courses to prevent syncing courses that are being copied or restored. Enable this setting to force the creation of Teams for hidden courses.';
+$string['acp_coursesync_hidden_course_note'] = 'Note: Hidden courses will not be processed for Teams group creation. To allow this, you must enable the "Sync hidden courses" setting in the plugin configuration.';
 $string['settings_coursesync_delete_group_on_course_deletion'] = 'Delete Microsoft 365 groups when connected Moodle course is deleted';
 $string['settings_coursesync_delete_group_on_course_deletion_details'] = 'If enabled, Moodle will try to delete the Microsoft 365 Group (and associated Team) when the connected course is deleted from Moodle. Note this does not apply to courses created from SDS sync.';
 $string['settings_coursesync_delete_group_on_course_sync_disabled'] = 'Delete Microsoft 365 Groups when course sync is disabled';
 $string['settings_coursesync_delete_group_on_course_sync_disabled_details'] = 'If enabled, Moodle will try to delete the connected Microsoft 365 Group (and associated Team) when course sync is turned off for a Moodle course.';
 $string['settings_coursesync_courses_per_task'] = 'Courses to sync per task run';
 $string['settings_coursesync_courses_per_task_details'] = 'The number of courses whose Team/group sync status are to be processed at each task run.';
+$string['settings_coursesync_team_type'] = 'Team template';
+$string['settings_coursesync_team_type_desc'] = 'The Microsoft Teams template to use when creating Teams from Moodle courses. Education templates require an education license. <br><br><strong>Important:</strong> The configured template determines how groups and teams are created:<br>
+&bull; Standard template creates standard groups and teams (compatible with all tenants).<br>
+&bull; Education templates create education groups/teams (education tenants only; enables education-specific features).<br>
+&bull; Custom templates use standard groups (for compatibility with custom template design).<br><br>
+<strong>⚠️ WARNING: Once a team is created with a specific template, the template cannot be changed.</strong> Teams remain associated with their original template. Changing this setting only affects newly created teams, not existing ones. Plan your template selection carefully before enabling course sync.';
+$string['settings_coursesync_team_type_standard'] = 'Standard';
+$string['settings_coursesync_team_type_educationclass'] = 'Education - Class Team';
+$string['settings_coursesync_team_type_educationstaff'] = 'Education - Staff Team';
+$string['settings_coursesync_team_type_educationplc'] = 'Education - Professional Learning Community (PLC)';
+$string['settings_coursesync_team_type_custom'] = 'Custom template';
+$string['settings_coursesync_team_type_custom_id'] = 'Custom template ID';
+$string['settings_coursesync_team_type_custom_id_desc'] = 'The full ID of a custom template defined in the Teams admin centre. Only used when "Custom template" is selected above. <br><br><strong>Template ID must be in GUID format</strong> (e.g., e41de7bb-859a-4a0f-aa39-5725a0529c1c). You can find the template ID in the Teams admin centre when viewing your custom template details. <br><br>
+<strong>⚠️ ADDITIONAL AZURE PERMISSION REQUIRED:</strong> Validating and using custom team templates requires an additional Microsoft Graph API application permission (<strong>TeamTemplates.Read.All</strong>) that may not be present in your Azure app registration. Without this permission, the validation step will fail and the custom template ID cannot be set. If validation fails with a permission error, contact your Azure administrator to add this permission to your app registration. <br><br>
+<strong>⚠️ IMPORTANT LIMITATION:</strong> The Microsoft Teams framework currently only supports creating teams from custom templates when the template includes an <strong>en-US locale definition</strong>. Custom templates without en-US locale support will fail to create teams. Please ensure your custom template has an en-US locale defined in the Teams admin centre. <br><br>
+<strong>⚠️ WARNING: Once a team is created using this custom template, the template cannot be changed.</strong> If you need to use a different custom template for new teams, you must leave this setting empty or change it before the next team creation. Existing teams will continue to use their original template. <br><br>
+Teams will not be created correctly if an incorrect template ID is configured. Use the "Test Template ID" button to validate the template ID before running course sync.';
+$string['error_custom_template_id_required'] = 'Custom template ID is required when using the "Custom template" option. Please enter a valid template ID.';
+$string['error_custom_template_id_not_found'] = 'Custom template ID "{$a}" not found. Please verify the template ID exists in the Teams admin centre.';
+$string['error_custom_template_id_permission'] = 'Permission denied. Your Office 365 account cannot use this template. Check with your Teams administrator.';
+$string['error_custom_template_id_validation_failed'] = 'Custom template ID validation failed. The template may not support direct team creation or there may be a configuration issue. Please verify the template ID in the Teams admin centre.';
+$string['settings_team_type_custom_id_test_button'] = 'Validate Custom Template ID';
+$string['settings_team_type_custom_id_validating'] = '🔄 Validating...';
+$string['settings_team_type_custom_id_error_empty'] = '⚠️ Please enter a template ID first.';
+$string['settings_team_type_custom_id_error_not_found'] = '✗ Template not found. The template ID "{$a}" does not exist. Please verify it in the Teams admin centre.';
+$string['settings_team_type_custom_id_error_validation'] = '✗ Validation error. {$a}';
+$string['settings_team_type_custom_id_error_default'] = 'Failed to validate the template. Please try again or contact your administrator.';
+$string['settings_team_type_custom_id_error_timeout'] = '✗ Validation timed out. The request took longer than 10 seconds. Please try again.';
+$string['settings_team_type_custom_id_error_network'] = '✗ Network error. Cannot reach the validation service. Please check your internet connection and try again.';
+$string['settings_team_type_custom_id_error_parsererror'] = '✗ Server response error. The validation service returned invalid data. Please check your Office 365 integration.';
+$string['settings_team_type_custom_id_error_http'] = '✗ Validation error (HTTP {$a}). Please try again or contact your administrator.';
+$string['settings_coursesync_team_type_educationplc_desc'] = 'The Professional Learning Community template. Teams are created directly from this template with automatic backing group provisioning. This template is only available on education tenants.';
+$string['settings_coursesync_group_channels'] = 'Create a channel for each Moodle group';
+$string['settings_coursesync_group_channels_details'] = 'Create a private channel in the connected Microsoft Team for each group in the Moodle course, and keep the members of each channel in line with the members of the Moodle group. Group members who are also connected to Microsoft 365 are added to, or removed from, the channel when they are added to, or removed from, the group. Anyone added to a channel in Microsoft Teams who is not a member of the Moodle group is removed again. In an education class Team that has not been activated yet, students cannot be put in channels: only the owners are, and the students are added automatically by the scheduled task "Create Teams channels for Moodle groups and sync their members" after an owner activates the Team in Microsoft Teams. Channels are not renamed or deleted when a Moodle group is renamed or deleted. Channel membership is only ever synchronized from Moodle to Teams, and this does nothing if "Course user sync behavior" is set to "From Teams to Moodle". Microsoft Teams allows up to 1,000 channels in a Team, counting private channels and channels deleted within the last 30 days.<br /><br /><b>This setting needs two additional Microsoft Graph application permissions:</b><ul><li><b>Channel.Create</b> - to create the channels.</li><li><b>ChannelMember.ReadWrite.All</b> - to add members to and remove members from the channels.</li></ul>Both must be added to the Microsoft Entra ID application used by Moodle and granted admin consent. The PowerShell script on the "Setup" tab already includes them when it registers a new application. For an application that already exists, add them manually under App registrations &gt; your application &gt; API permissions &gt; Add a permission &gt; Microsoft Graph &gt; Application permissions, then grant admin consent. While this setting is enabled, "Verify setup" on the "Setup" tab reports these permissions as missing until they are granted.';
 $string['settings_coursesync_sync_direction'] = 'Course user sync behavior';
 $string['settings_coursesync_sync_direction_details'] = 'Select the direction in which you want the users to be synchronized between Moodle and Microsoft Teams.';
 $string['settings_coursesync_sync_moodle_to_teams'] = 'From Moodle to Teams';
@@ -313,7 +356,7 @@ $string['acp_coursesynccustom'] = 'Course sync customization';
 $string['acp_coursesynccustom_enabled'] = 'Enabled';
 $string['acp_coursesynccustom_enable_all'] = 'Enable course sync on all courses';
 $string['acp_coursesynccustom_disable_all'] = 'Disable course sync on all courses';
-$string['acp_coursesynccustom_bulk'] = 'Bulk Operations';
+$string['acp_coursesynccustom_bulk'] = 'Bulk operations';
 $string['acp_coursesynccustom_bulk_enable'] = 'Enable course sync on courses on this page';
 $string['acp_coursesynccustom_bulk_disable'] = 'Disable course sync on courses on this page';
 $string['acp_coursesynccustom_settings_header'] = 'Sync options';
@@ -322,9 +365,15 @@ $string['acp_coursesynccustom_new_course_desc'] = 'If enabled, all newly created
 $string['acp_coursesynccustom_controlled_per_course'] = 'Allow configure course sync in course';
 $string['acp_coursesynccustom_controlled_per_course_desc'] = 'If enabled, enrolled users in Moodle courses who are eligible to act as Team owners (having "Team owner" [local/o365:teamowner] capability) will be able to control course sync from the Microsoft block in the course.';
 $string['acp_coursesynccustom_savemessage'] = 'Your changes have been saved.';
-$string['acp_coursesynccustom_searchwarning'] = 'Note: Searches will lose any unsaved progress. Press save changes to ensure your changes are saved.';
+$string['acp_coursesynccustom_regex_search'] = 'Regex search';
+$string['acp_coursesynccustom_regex_search_title'] = 'When checked, the search box above is matched as a PCRE regular expression (without delimiters) against the full name, short name and ID number, instead of a plain text search.';
 $string['acp_coursesynccustom_confirm_all_action'] = 'Are you sure you want to change sync status of all courses? The action cannot be undone.';
 $string['acp_coursesynccustom_sds_course'] = 'Locked for SDS course';
+$string['acp_coursesynccustom_all_enabled_notice'] = 'Course sync is currently enabled for all courses. Individual course customization is disabled because "All Features Enabled" mode is active.';
+$string['acp_coursesynccustom_disabled_notice'] = 'Course sync is currently disabled globally. Individual course customization is disabled because "Disabled" mode is active.';
+$string['acp_coursesynccustom_categories_header'] = 'Sync by course category';
+$string['acp_coursesynccustom_categories_desc'] = 'Select one or more course categories to automatically enable course sync for all courses in those categories, including their subcategories. This also applies to courses added to the selected categories later. Hold Ctrl (Cmd on Mac) to select multiple categories, or click again while holding it to deselect.';
+$string['acp_coursesynccustom_category_course'] = 'Locked: enabled by course category';
 
 // Settings in the "Cohort sync" section of the "Sync settings" tab.
 $string['settings_secthead_cohortsync'] = 'Cohort sync';
@@ -333,6 +382,8 @@ $string['settings_cohortsync'] = 'Cohort synchronization';
 $string['settings_cohortsync_linktext'] = 'Manage Cohort sync';
 $string['settings_cohortsync_details'] = 'Review and manage synchronization between Moodle Cohorts and Microsoft Groups.';
 $string['settings_cohortsync_title'] = 'Cohort sync';
+$string['settings_cohortsync_excludeowners'] = 'Exclude group owners from cohort sync';
+$string['settings_cohortsync_excludeowners_desc'] = 'If enabled, group owners are not synchronised to Moodle cohorts, even if they are also group members. Owners already in a cohort will be removed on the next sync run.';
 
 // Settings in the "Team / group names" section of the "Sync settings" tab.
 $string['settings_secthead_team_group_name'] = 'Team / group names';
@@ -385,6 +436,16 @@ $string['settings_course_request_enrolment_member_role_desc'] = 'The role that w
 
 // Settings section headings of the "Advanced" tab.
 $string['settings_header_tools'] = 'Tools';
+$string['settings_secthead_calsync'] = 'Calendar sync';
+$string['settings_calsyncsubscribemode'] = 'Calendar sync subscription';
+$string['settings_calsyncsubscribemode_details'] = 'Controls whether users have to turn on Outlook calendar sync themselves.<ul><li><b>Opt-in</b>: users enable calendar sync and tick the calendars to sync on their calendar sync settings page.</li><li><b>Opt-out</b>: users connected to Microsoft 365 automatically get calendar sync enabled and are subscribed to the calendars chosen below (for courses, all courses they are enrolled in, now and in future), syncing from Moodle to their primary Outlook calendar. Users can still change or turn this off on their calendar sync settings page, and users who turn calendar sync off are not subscribed again.</li></ul>Switching back to "Opt-in" does not remove existing subscriptions.';
+$string['settings_calsyncsubscribetypes'] = 'Calendars to subscribe users to automatically';
+$string['settings_calsyncsubscribetypes_details'] = 'Only applies to "Opt-out". Choose which Moodle calendars connected users are subscribed to automatically. Subscribing everyone to the site calendar adds every user as an attendee of each site event, so it is not selected by default.';
+$string['settings_calsyncsubscribetypes_site'] = 'Site calendar';
+$string['settings_calsyncsubscribetypes_user'] = 'Personal calendar';
+$string['settings_calsyncsubscribetypes_course'] = 'Course calendars (all courses the user is enrolled in)';
+$string['settings_calsyncsubscribemode_optin'] = 'Opt-in (users enable calendar sync themselves)';
+$string['settings_calsyncsubscribemode_optout'] = 'Opt-out (enable calendar sync for all connected users automatically)';
 $string['settings_secthead_advanced'] = 'Advanced Settings';
 $string['settings_secthead_advanced_desc'] = 'These settings control other features of the plugin suite. Be careful! These may cause unintended effects.';
 
@@ -403,11 +464,25 @@ $string['settings_teamconnections_linktext'] = 'Manage Team Connections';
 $string['settings_teamconnections_details'] = 'Review and manage connections between Moodle course and Microsoft Teams.';
 $string['settings_usermatch'] = 'User Matching';
 $string['settings_usermatch_details'] = 'This tool allows you to match Moodle users with Microsoft 365 users based on a custom uploaded data file.';
+$string['settings_usersyncgroupfilter'] = 'User sync group filter';
+$string['settings_usersyncgroupfilter_details'] = 'When a group object ID (GUID) is entered here, full user syncs will be restricted to members and owners of that Microsoft 365 group. Leave blank to sync all licensed users in your tenant.<br><br>
+<strong>CAUTION: This is an advanced setting. Misconfiguration can cause significant data synchronisation issues.</strong><br><br>
+<strong>When configured, the following apply:</strong><br>
+(1) Profile updates, timezone updates, and photo updates will only be applied to users who are members or owners of the group<br>
+(2) New Moodle accounts will only be created for users who are members or owners of the group<br>
+(3) Moodle accounts for non-member users will no longer receive updates and may become out-of-sync with Microsoft 365<br>
+(4) Users disabled in Microsoft 365 will still be suspended in Moodle by the enabled-status sync, which runs independently of group filtering<br>
+(5) Removing a user from the group stops future syncs for that account. Their Moodle account is not deleted, and is only suspended if the "Suspend accounts in Moodle when not in the configured user sync group" option is enabled, which suspends every synced user who is not in the group, whether or not they were ever in it<br><br>
+<strong>Incremental (delta) sync limitation:</strong> Microsoft Graph does not support delta queries on group membership endpoints. When this setting is configured, delta syncs will perform a full group-member sync instead of an incremental update. This is correct behaviour but may be slower than a normal delta sync.<br><br>
+Validate the group object ID before saving. Enter the group object ID (GUID).';
+$string['settings_usersyncgroupfilter_validation_error'] = 'Invalid group ID format. The group ID must be a valid GUID (e.g., 550e8400-e29b-41d4-a716-446655440000).';
 $string['settings_usersynccreationrestriction'] = 'User creation restriction';
-$string['settings_usersynccreationrestriction_details'] = 'If enabled, only Microsoft Entra ID users matching the condition will be created during user sync.';
+$string['settings_usersynccreationrestriction_details'] = 'If enabled, only Microsoft Entra ID users matching the condition will be created during user sync. For Microsoft 365 Group Membership (group object ID), enter one group object ID or multiple group object IDs separated by commas.';
 $string['settings_usersynccreationrestriction_fieldval'] = 'Field value';
 $string['settings_usersynccreationrestriction_o365group'] = 'Microsoft 365 Group Membership (group name)';
 $string['settings_usersynccreationrestriction_o365groupid'] = 'Microsoft 365 Group Membership (group object ID)';
+$string['settings_usersynccreationrestriction_invalidgroupid'] = 'Microsoft 365 group object ID "{$a}" could not be found. Check the ID and try again.';
+$string['settings_usersynccreationrestriction_groupvalidationerror'] = 'The Microsoft 365 group object IDs could not be validated. Check the IDs and Microsoft Graph configuration, then try again.';
 $string['settings_usersynccreationrestriction_regex'] = 'Value is a regular expression';
 $string['settings_maintenance'] = 'Maintenance';
 $string['settings_maintenance_details'] = 'Various maintenance tasks are available to resolve some common issues.';
@@ -463,6 +538,26 @@ $string['acp_userconnections_column_o365user'] = 'Microsoft 365 User';
 $string['acp_userconnections_column_status'] = 'Connection Status';
 $string['acp_userconnections_column_actions'] = 'Actions';
 $string['acp_userconnections_column_usinglogin'] = 'Using Login';
+$string['acp_userconnections_column_status_help'] = 'The connection status shows how a Moodle account is linked to a Microsoft 365 (Microsoft Entra ID) account.
+
+* **Connected** – The user has completed the connection by logging in to Moodle with their Microsoft 365 account, or an administrator has actively connected the account. Features such as calendar sync and OneDrive work for this user.
+* **Matched** – An administrator (or the bulk user matching tool) has recorded which Microsoft 365 account this Moodle user belongs to, but the connection is not active yet. It completes the first time the user logs in with Microsoft 365. Nothing syncs while a user is only matched.
+* **Synced** – The Moodle account was created from Microsoft Entra ID by the user sync task, but the user has not logged in yet. The account activates on first login.
+* **No connection** – The Moodle account is not linked to any Microsoft 365 account.';
+$string['acp_userconnections_column_actions_help'] = 'The actions available for a row depend on its connection status.
+
+* **Disconnect** – Removes the link between the Moodle account and the Microsoft 365 account. The person keeps their Moodle account but can no longer use Microsoft 365 features or log in with Microsoft 365 until they connect again. Shown for connected users.
+* **Resync** – Runs the Microsoft 365 data sync for this user straight away (profile fields, photo, calendar and so on) instead of waiting for the scheduled task, and shows the result. Shown for connected and synced users.
+* **Match** – Records which Microsoft 365 account this Moodle user belongs to. The connection is not active until the person logs in with Microsoft 365. Shown for users with no connection.
+* **Unmatch** – Removes a match that has not been completed yet. Shown for matched users.';
+$string['acp_userconnections_accountstatus_active'] = 'Active';
+$string['acp_userconnections_accountstatus_suspended'] = 'Suspended';
+$string['acp_userconnections_connectionstatus_connected'] = 'Connected';
+$string['acp_userconnections_connectionstatus_matched'] = 'Matched';
+$string['acp_userconnections_connectionstatus_noconnection'] = 'No connection';
+$string['acp_userconnections_connectionstatus_synced'] = 'Synced';
+$string['acp_userconnections_filtering_accountstatus'] = 'Account status';
+$string['acp_userconnections_filtering_connectionstatus'] = 'Connection status';
 $string['acp_userconnections_filtering_muserfullname'] = 'Moodle user full name';
 $string['acp_userconnections_filtering_musername'] = 'Moodle username';
 $string['acp_userconnections_filtering_o365username'] = 'Microsoft 365 username';
@@ -478,6 +573,8 @@ $string['acp_userconnections_manualmatch_error_o365usermatched'] = 'The Microsof
 $string['acp_userconnections_manualmatch_error_o365userconnected'] = 'The Microsoft 365 user is already connected to another Moodle user';
 $string['acp_userconnections_resync_notconnected'] = 'This user is not connected to Microsoft 365';
 $string['acp_userconnections_resync_nodata'] = 'Could not find stored Microsoft 365 information for this user.';
+$string['acp_userconnections_resync_notfound'] = 'No data was synced. The account "{$a->username}" is linked to Microsoft Entra ID object {$a->objectid}, but that object could not be found. The user has most likely been deleted or disabled in Microsoft 365, or the stored object ID is stale.';
+$string['acp_userconnections_resync_nooutput'] = 'The resync finished without reporting any changes.';
 $string['acp_userconnections_table_connected'] = 'Connected';
 $string['acp_userconnections_table_disconnect'] = 'Disconnect';
 $string['acp_userconnections_table_disconnect_confirmmsg'] = 'This will disconnect the Moodle user "{$a}" from Microsoft 365. Click the link below to proceed.';
@@ -498,6 +595,8 @@ $string['acp_teamconnections_cache_never_updated'] = 'Teams cache was never upda
 $string['acp_teamconnections_connected_team'] = 'Connected Team';
 $string['acp_teamconnections_connection_completed'] = 'The course has been successfully connected to the Team';
 $string['acp_teamconnections_course_connected'] = 'The course has been successfully connected with the Team.';
+$string['acp_teamconnections_course_disconnected'] = 'The course has been disconnected from the Team.';
+$string['acp_teamconnections_team_linked'] = 'The course has been linked to the Team.';
 $string['acp_teamconnections_current_connection'] = 'CURRENT CONNECTION';
 $string['acp_teamconnections_exception_course_not_exist'] = 'The course to be connected does not exist.';
 $string['acp_teamconnections_exception_invalid_team_id'] = 'Invalid Team ID';
@@ -507,8 +606,10 @@ $string['acp_teamconnections_exception_team_already_connected'] = 'The Team is a
 $string['acp_teamconnections_exception_team_creation'] = 'Error occurred when trying to create Team. Details: {$a}';
 $string['acp_teamconnections_exception_team_no_owner'] = 'Cannot find suitable Team owner.';
 $string['acp_teamconnections_form_connect_course'] = 'Manage Team connection for course {$a}';
-$string['acp_teamconnections_form_sds_warning'] = 'NOTE: Manually connect a Moodle course with a Team created by Student Data Sync (SDS) may result in unexpected behaviour in both Moodle course sync and SDS sync, therefore should be prohibited.';
+$string['acp_teamconnections_form_sds_warning'] = 'NOTE: Teams created by Student Data Sync (SDS) cannot be manually connected here, as this would conflict with SDS sync. They are excluded from the search results below.';
 $string['acp_teamconnections_form_team'] = 'Select Team';
+$string['acp_teamconnections_form_team_noselection'] = 'Search for a Team...';
+$string['acp_teamconnections_no_teams_found'] = 'No Teams found for "{$a}"';
 $string['acp_teamconnections_group_only'] = ' (Group only)';
 $string['acp_teamconnections_team_missing'] = '(Team missing)';
 $string['acp_teamconnections_invalid_connection'] = 'Invalid connection';
@@ -517,13 +618,26 @@ $string['acp_teamconnections_sync_disabled'] = 'Course sync needs to be enabled 
 $string['acp_teamconnections_table_connect'] = 'Connect';
 $string['acp_teamconnections_table_connect_to_different_team'] = 'Connect to a different Team';
 $string['acp_teamconnections_table_cannot_create_team_from_group'] = 'Cannot create Team from group - no owner';
+$string['acp_teamconnections_table_link_team'] = 'Link to Team "{$a}"';
 $string['acp_teamconnections_table_missing_team'] = 'The course is connected to a non-existing team. This will be cleaned up on the next course sync scheduled task run.';
+$string['acp_teamconnections_table_resync'] = 'Resync';
 $string['acp_teamconnections_table_update'] = 'Update';
 $string['acp_teamconnections_team_already_connected'] = 'The course is already connected to a Team.';
 $string['acp_teamconnections_team_created'] = 'Team was created successfully for the course.';
 $string['acp_teamconnections_team_exists_but_not_connected'] = 'The course is configured to be connected to a Group only, however a Team connected to the Group exists.';
 $string['acp_teamconnections_teams_cache_updated'] = 'Teams cache updated successfully.';
 $string['acp_teamconnections_no_owner'] = 'Add owner to connect to Teams.';
+$string['acp_teamconnections_resync'] = 'Resync Team owners / members';
+$string['acp_teamconnections_resync_title'] = 'Resync Team owners / members for course {$a}';
+$string['acp_teamconnections_resync_desc'] = 'This compares the course\'s enrolled users against the connected Microsoft 365 group/Team\'s owners and members, and adds anyone who is missing. Choose whether users who are in the Team but not enrolled in the Moodle course should also be removed.';
+$string['acp_teamconnections_resync_keep'] = 'Resync (keep additional Team members)';
+$string['acp_teamconnections_resync_keep_desc'] = 'Users enrolled in the Moodle course who are missing from the Team will be added. Existing Team owners / members who are not enrolled in the Moodle course will not be changed.';
+$string['acp_teamconnections_resync_remove'] = 'Resync and remove additional Team members';
+$string['acp_teamconnections_resync_remove_desc'] = 'Warning: any Team owner or member who is not enrolled in the Moodle course will be removed from the Team, even if they were added directly in Microsoft Teams.';
+$string['acp_teamconnections_resync_completed'] = 'Team owners / members have been resynced.';
+$string['acp_teamconnections_resync_failed'] = 'Could not resync Team owners / members. See the output above for details.';
+$string['acp_teamconnections_last_resync'] = 'Last resynced: {$a}';
+$string['acp_teamconnections_never_resynced'] = 'Never resynced';
 
 // Settings in the "User matching" feature of the "Advanced" tab.
 $string['acp_usermatch'] = 'User Matching';
@@ -571,11 +685,14 @@ $string['acp_maintenance_debugdata'] = 'Generate debug data package';
 $string['acp_maintenance_debugdata_desc'] = 'This will generate a package containing various pieces of information about your Moodle and Microsoft 365 environment to assist developers in solving any issues you may have. If requested by a developer, run this tool and send the resulting file download. Note: Although this package does not contain sensitive token data, we ask that you do not post this file publicly or send it to an untrusted party.';
 $string['acp_maintenance_cleandeltatoken'] = 'Cleanup User Sync Delta Tokens';
 $string['acp_maintenance_cleandeltatoken_desc'] = 'If user synchronisation is not fully working after updating it user sync settings, it may be caused by an old delta sync token. Cleaning up the token will remove force a complete re-sync the next time when the user sync is run.';
+$string['acp_maintenance_cleanapptokens'] = 'Cleanup Application Tokens';
+$string['acp_maintenance_cleanapptokens_desc'] = 'Removes the stored application tokens, which the plugin uses for calls to Microsoft APIs that do not run as a user. New application tokens are requested automatically when they are next needed, and the results of the last "Verify setup" check on the Setup tab are cleared. If calls made with application permissions fail with authentication errors, for example after the permissions of the Microsoft Entra ID application or its credentials have changed, cleaning up the tokens can help. Tokens of users are not affected.';
 
 // Settings in the "Resync users in Microsoft 365 groups for courses" feature in the "Maintenance Tools" feature of the
 // "Advanced" tab.
 $string['acp_maintenance_resyncgroupusers_course_output'] = 'Resync output';
 $string['acp_maintenance_resyncgroupusers_no_course'] = 'No course connected to Microsoft 365';
+$string['acp_maintenance_coursesync_disabled'] = 'This tool is only available when course sync is enabled. <a href="{$a}">Manage course sync</a>.';
 
 // Settings in the "Recreate deleted Microsoft 365 groups" feature in the "Maintenance Tools" feature of the "Advanced" tab.
 $string['acp_maintenance_recreatedeletedgroups_group_type'] = 'Moodle object type';
@@ -591,6 +708,8 @@ $string['acp_maintenance_recreatedeletedgroups_all_groups_exist'] = 'All groups 
 
 // Settings in the "Cleanup User Sync Delta Tokens" feature in the "Maintenance Tools" feature of the "Advanced" tab.
 $string['acp_maintenance_cleandeltatoken_completed'] = 'User sync delta token and skip delta token were cleaned up.';
+$string['acp_maintenance_cleanapptokens_confirm'] = 'Are you sure you want to clean up the application tokens? {$a} application token(s) are currently stored.';
+$string['acp_maintenance_cleanapptokens_completed'] = 'Application tokens and the last "Verify setup" results were cleaned up.';
 
 // Settings "Advanced settings" section of the "Advanced" tab.
 $string['settings_course_reset_teams'] = 'Course reset Team/group actions';
@@ -603,14 +722,19 @@ $string['settings_reset_team_name_prefix'] = 'Reset Team name prefix';
 $string['settings_reset_team_name_prefix_details'] = 'When resetting a course that is connected to a Team, the name of the existing connected Team will be prefixed with this.';
 $string['settings_reset_group_name_prefix'] = 'Reset group name prefix';
 $string['settings_reset_group_name_prefix_details'] = 'When resetting a course that is connected to a group, the name of the existing group will be prefixed with this.';
-$string['settings_o365china'] = 'Microsoft 365 for China';
-$string['settings_o365china_details'] = 'Check this if you are using Microsoft 365 for China.';
+$string['settings_calsync_courseeventmode'] = 'Outlook events for course calendar events';
+$string['settings_calsync_courseeventmode_details'] = 'Controls how a Moodle course calendar event is created in Outlook for users who have subscribed to the course calendar.
+<ul>
+<li><strong>One shared event with course users as attendees:</strong> a single event is created in the Outlook calendar of the user who created the Moodle event (or in the course\'s Microsoft 365 group calendar, if the course is linked to a group), and the course users are added to it as attendees.</li>
+<li><strong>One individual event per user:</strong> a separate event is created directly in each subscribed user\'s own Outlook calendar. There is no shared event, no attendee list, and nothing is added to the Microsoft 365 group calendar.</li>
+</ul>
+Changing this setting only affects events synced afterwards; events already in Outlook are not converted.';
+$string['settings_calsync_courseeventmode_shared'] = 'One shared event with course users as attendees';
+$string['settings_calsync_courseeventmode_individual'] = 'One individual event per user';
 $string['settings_debugmode'] = 'Record debug messages';
 $string['settings_debugmode_details'] = 'If enabled, information will be logged to the Moodle log that can help in identifying problems. <a href="{$a}">View recorded log messages.</a>';
 $string['settings_switchauthminupnsplit0'] = 'Minimum inexact username length to switch to Microsoft 365';
-$string['settings_switchauthminupnsplit0_details'] = 'If you enable the "Switch matched users to Microsoft 365 authentication" setting, this sets the minimum length for usernames without a tenant (the @example.onmicrosoft.com part) which will be switched. This helps to avoid switching accounts with generic names, like "admin", which aren\'t necessarily same in Moodle and Microsoft Entra ID.';
-$string['settings_photoexpire'] = 'Profile photo refresh time';
-$string['settings_photoexpire_details'] = 'The number of hours to wait before refreshing profile photos. Longer times can increase performance.';
+$string['settings_switchauthminupnsplit0_details'] = 'If you enable the "Switch matched users to Microsoft 365 authentication" setting, this sets the minimum length for usernames without a tenant (the @example.onmicrosoft.com part) which will be switched. This helps to avoid switching accounts with generic names, like "admin", which aren\'t necessarily the same in Moodle and Microsoft Entra ID. Set to 0 to switch matched users regardless of username length. Users whose auth method was not switched because of this setting are logged as "Matched user, but the username is not an exact match to the Microsoft Entra ID UPN and does not meet the exact-match requirements for switching to OIDC..." in the sync task output, and show as "Matched with existing user - Awaiting completion" on the Manage User Connections page.';
 $string['settings_customtheme'] = 'Custom theme (Advanced)';
 $string['settings_customtheme_desc'] = 'Recommended theme is "boost_o365teams". However, you can select different theme if you have a custom theme which is adapted to be used in the Teams tab.<br/>
 Please note that a custom theme set at either course or category level would take precedence over settings here, i.e. a course would use course or category theme in Moodle app in Teams by default. This can be fixed by updating $CFG->themeorder in config.php to be "array(\'session\', \'course\', \'category\', \'user\', \'cohort\', \'site\');".';
@@ -620,33 +744,58 @@ $string['settings_sds_intro'] = '';
 $string['settings_sds_intro_previewwarning'] = '<div class="alert"><b>This is a preview feature</b><br />Preview features may not work as intended or may break without warning. Please proceed with caution.</div>';
 $string['settings_sds_intro_desc'] = 'The Microsoft School Data Sync ("SDS") simplifies class management in Microsoft 365, by reading rosters from external SIS and create classes and groups in Microsoft 365. <a href="https://sds.microsoft.com/" target="_blank">Learn More</a><br/>
 <br/>
-The SDS sync feature is capable of synchronising roster data from SDS to Moodle, including courses, teachers and students.<br/>
+The SDS sync feature is capable of synchronising roster data from SDS to Moodle, including classes, teachers and students.<br/>
 <br/>
 In order to use the SDS sync feature, please ensure the Microsoft Entra ID app used for the integration has <b>EduRoster.Read.All</b> and <b>Member.Read.Hidden</b> Microsoft Graph application permissions, which are not automatically added by the default set up. Admin consent needs to be granted for them too.<br/>
 <br/>
 By default, the SDS sync process happens daily in the Moodle cron, at 3am server time. To change this schedule, please visit the <a href="{$a}">scheduled tasks management page.</a><br/><br/>';
-$string['settings_sds_coursecreation'] = 'Course Sync';
+$string['settings_sds_coursecreation'] = 'Class to Course Sync';
 $string['settings_sds_coursecreation_desc'] = 'These options control creating Moodle courses based on SDS school classes.';
 $string['settings_sds_coursecreation_enabled'] = 'Synced schools';
-$string['settings_sds_coursecreation_enabled_desc'] = 'Create courses for these schools.';
+$string['settings_sds_coursecreation_enabled_desc'] = 'Create courses for classes in these schools.';
 $string['settings_sds_teams_enabled'] = 'SDS classes already have Teams?';
 $string['settings_sds_teams_enabled_desc'] = 'Check this if the SDS classes already have Teams created by the SDS configuration. If checked, Moodle will not try to create Teams from the Moodle courses created from SDS classes to avoid conflicts.';
 $string['settings_sds_courseenrolsync'] = 'Course Enrolment Sync';
 $string['settings_sds_courseenrolsync_desc'] = 'These options control synchronising course enrolments from SDS school classes.';
-$string['settings_sds_enrolment_enabled'] = 'Sync enrolments from SDS classes to Moodle courses at course creation';
-$string['settings_sds_enrolment_enabled_desc'] = 'Enrol SDS class teachers and students into Moodle courses created from the SDS classes when syncing a SDS class initially.<br />
-Note this is a once-off sync when creating a Moodle course from a SDS class for the first time. In order to continuously sync SDS class teacher/member role changes to Moodle courses, <b>Advanced enrolments sync with SDS classes</b> option has to be enabled, and <b>Teacher role</b> and <b>Member role</b> settings have to be configured.';
-$string['settings_sds_sync_enrolment_to_sds'] = 'Advanced enrolments sync with SDS classes';
-$string['settings_sds_sync_enrolment_to_sds_desc'] = 'This option requires <b>Enrol users</b> option to be enabled to work.<br />
-If this setting is enabled, the SDS class sync will do the following:
+$string['settings_sds_enrolment_enabled'] = 'Sync enrolments from SDS to Moodle';
+$string['settings_sds_enrolment_enabled_desc'] = 'When enabled, the SDS sync scheduled task will enrol teachers and students from SDS classes into their corresponding Moodle courses, and remove users who are no longer in the SDS class. Requires <b>Teacher role</b> and <b>Member role</b> to be configured.';
+$string['settings_sds_sync_enrolment_to_sds'] = 'Sync enrolments from Moodle to SDS';
+$string['settings_sds_sync_enrolment_to_sds_desc'] = 'When enabled, enrolment changes made in Moodle courses connected to SDS classes will be synchronised back to SDS classes. The ownership / membership status of the user in SDS will depend on the "local/o365:teamowner" and "local/o365:teammember" capabilities in the course context.';
+$string['settings_sds_suspend_enrolment'] = 'Suspend user enrolments instead of unenrolling';
+$string['settings_sds_suspend_enrolment_desc'] = 'When this option is enabled, users who are removed from an SDS class will have their enrolment suspended in the connected Moodle course instead of being completely unenrolled. This preserves user data such as grades, submissions, and activity completion. When users are added back to the SDS class, their enrolment will be automatically reactivated.<br />
+<b>Note:</b> Teachers are never suspended or unenrolled by SDS sync. This setting only affects students.';
+$string['settings_sds_enable_course_sync'] = 'Enable two-way course sync';
+$string['settings_sds_enable_course_sync_desc'] = 'When enabled, each Moodle course created from an SDS class will be linked to its Microsoft 365 group in the database, activating the full Microsoft 365 course sync integration (Teams, files, calendar, etc.) for that course. If the SDS class already has a Team, a Teams association record is also created.';
+$string['settings_sds_course_field_mailnickname'] = 'Mail nickname (mailNickname)';
+$string['settings_sds_course_field_displayname'] = 'Display name (displayName)';
+$string['settings_sds_course_field_classcode'] = 'Class code (classCode)';
+$string['settings_sds_course_field_externalname'] = 'External name (externalName)';
+$string['settings_sds_course_shortname_field'] = 'Course short name source';
+$string['settings_sds_course_shortname_field_desc'] = 'The SDS class property used as the short name of newly created Moodle courses. Moodle requires course short names to be unique. If the chosen property is empty, or its value is already used by a course linked to another SDS class, the mail nickname is used instead. Changing this setting does not rename courses that have already been created.';
+$string['settings_sds_course_fullname_field'] = 'Course full name source';
+$string['settings_sds_course_fullname_field_desc'] = 'The SDS class property used as the full name of newly created Moodle courses. If the chosen property is empty, the display name is used instead. Changing this setting does not rename courses that have already been created.';
+$string['settings_sds_categorize_by_subject'] = 'Categorize courses by subject';
+$string['settings_sds_categorize_by_subject_desc'] = 'When enabled, courses will be organized into subject-based categories within each school category. The subject name is extracted from the class information in SDS. When disabled, all courses are placed directly in the school category.';
+$string['settings_sds_ignore_past_courses'] = 'Ignore expired/past classes';
+$string['settings_sds_ignore_past_courses_desc'] = 'When enabled, classes that have expired or ended will be skipped during sync. This includes:<br />
 <ul>
-<li>Changes in SDS class ownership / membership status will be synced to Moodle course and reflected in Moodle user role changes.</li>
-<li>User enrolment changes, such as enrolments and unenrolments, that are made in Moodle course connected to SDS classes will be synchronised back to SDS classes. The ownership / membership status of the user will depend on the "local/o365:teamowner" and "local/o365:teammember" capabilities in the course context.</li>
-</ul>';
-$string['settings_sds_enrolment_teacher_role'] = 'Teacher role';
-$string['settings_sds_enrolment_teacher_role_desc'] = 'If the "Enrol users" option is enabled, teachers in SDS class will be enrolled in connected Moodle course with this role.';
-$string['settings_sds_enrolment_student_role'] = 'Member role';
-$string['settings_sds_enrolment_student_role_desc'] = 'If the "Enrol users" option is enabled, students in SDS class will be enrolled in connected Moodle course with this role.';
+<li>Classes with the configured expired prefix in their name (default: "Exp")</li>
+<li>Classes with an end date in the past</li>
+</ul>
+This helps keep your course catalog clean by not creating courses for old or archived classes.';
+$string['settings_sds_expired_course_prefix'] = 'Expired class name prefix';
+$string['settings_sds_expired_course_prefix_desc'] = 'Class names starting with this prefix will be considered expired and skipped during sync (if "Ignore expired/past classes" is enabled). Default: "Exp"';
+$string['settings_sds_cohortsync'] = 'Cohort Sync';
+$string['settings_sds_cohortsync_desc'] = 'These options control creating and synchronizing cohorts from SDS classes. Cohorts provide an alternative way to group users that can be used for site-wide enrollment or other Moodle features.';
+$string['settings_sds_create_cohorts'] = 'Create cohorts from SDS classes';
+$string['settings_sds_create_cohorts_desc'] = 'When enabled, a cohort will be created for each SDS class and membership will be kept synchronized with the SDS class. Cohorts are created in the context of the course category (school or subject category depending on your categorization settings).<br />
+<b>Note:</b> Cohorts are created in addition to courses, not instead of them. This allows you to use cohorts for site-wide enrollment or grouping while still maintaining SDS-synced courses.';
+$string['settings_sds_cohort_include_teachers'] = 'Include teachers in cohorts';
+$string['settings_sds_cohort_include_teachers_desc'] = 'When enabled, teachers from the SDS class will be added to the cohort along with students. When disabled, only students will be added to cohorts.';
+$string['settings_sds_enrolment_teacher_role'] = 'SDS class teacher role in Moodle';
+$string['settings_sds_enrolment_teacher_role_desc'] = 'If "Sync enrolments from SDS to Moodle" is enabled, teachers in the SDS class will be enrolled in the connected Moodle course with this role.';
+$string['settings_sds_enrolment_student_role'] = 'SDS class student role in Moodle';
+$string['settings_sds_enrolment_student_role_desc'] = 'If "Sync enrolments from SDS to Moodle" is enabled, students in the SDS class will be enrolled in the connected Moodle course with this role.';
 $string['settings_sds_profilesync_header'] = 'User Profile Sync';
 $string['settings_sds_profilesync_header_desc'] = 'Each SDS school may store user profile for teachers and members of the school. The field is school-specific, i.e. different schools may have different values in the same field for the same user.<br/>
 If a school is selected in this section, the SDS user profile fields can be configured in user field mapping.
@@ -664,6 +813,7 @@ $string['settings_sds_school_disabled_action'] = 'School sync disabled action';
 $string['settings_sds_school_disabled_action_desc'] = 'Action to the already connected Moodle courses when sync is disabled on an SDS school.';
 $string['settings_sds_school_disabled_action_keep_connected'] = 'Keep the Moodle course connected to the Team';
 $string['settings_sds_school_disabled_action_disconnect'] = 'Disconnect the Moodle course with the Team';
+$string['settings_sds_school_unavailable'] = '{$a} (SDS school list currently unavailable)';
 
 // Settings in the "Teams Settings" tab.
 $string['settings_teams_banner'] = 'The Moodle app for <a href="https://aka.ms/MoodleLearnTeams" target="_blank">Microsoft Teams</a> allows you to easily access and collaborate around your Moodle courses in Teams.';
@@ -745,6 +895,7 @@ $string['erroracplocalo365notconfig'] = 'Please configure local_o365 first.';
 $string['errorhttpclientbadtempfileloc'] = 'Could not open temporary location to store file.';
 $string['errorhttpclientnofileinput'] = 'No file parameter in httpclient::put';
 $string['errorcouldnotrefreshtoken'] = 'Could not refresh token';
+$string['errormfarequired'] = 'Microsoft requires multi-factor authentication before Moodle can access your Microsoft 365 account. Please log out of Moodle, then log in again using your Microsoft 365 account and complete the multi-factor authentication prompt.';
 $string['errorgetapplicationtoken'] = 'Could not get application token. Please verify your integration configuration.';
 $string['erroracpapcantgettenant'] = 'Could not get Microsoft Entra tenant, please enter manually.';
 $string['erroracpcantgettenant'] = 'Could not get OneDrive URL, please enter manually.';
@@ -761,12 +912,16 @@ $string['erroro365apinotimplemented'] = 'This should be overridden.';
 $string['erroro365apinotoken'] = 'Did not have a token for the given resource and user, and could not get one. Is the user\'s refresh token expired?';
 $string['erroro365apisiteexistsnolocal'] = 'Site already exists, but could not find local record.';
 $string['errorusermatched'] = 'The Microsoft 365 account "{$a->entraidupn}" is already matched with Moodle user "{$a->username}". To complete the connection, please log in as that Moodle user first and follow the instructions in the Microsoft block.';
-$string['errorupnchangeisnotsupported'] = 'Your Microsoft account UPN has changed. Please contact your administrator to update your Moodle account.';
 $string['errornodirectaccess'] = 'Direct access to the page is prohibited';
 $string['eventapifail'] = 'API failure';
-$string['errorupnchangeisnotsupported'] = 'Your Microsoft account UPN has changed. Please contact your administrator to update your Moodle account.';
-$string['errortenantvaluenotstring'] = 'Tenant value must be a string';
 $string['errorunabletofindgraphapi'] = 'Unable to find graph api in application.';
+$string['erroremptyjwt'] = 'Empty JWT token provided';
+$string['errornocachedjwks'] = 'No cached JWKS found';
+$string['errorfetchjwks'] = 'Failed to fetch JWKS from Microsoft';
+$string['errorinvalidjwks'] = 'Invalid JWKS format received from Microsoft';
+$string['errorjwtvalidation'] = 'JWT validation failed';
+$string['errorjwtinvalidissuer'] = 'JWT issuer validation failed';
+$string['errorjwtinvalidaudience'] = 'JWT audience validation failed';
 $string['errorcannotgettoken'] = 'Could not get app or system token.';
 $string['errornotokenforsysmemuser'] = 'No token available for system user. Please run local_o365 health check.';
 $string['errornotoken'] = 'No token available for user #{$a}';
@@ -777,6 +932,9 @@ $string['errornoresponsesavailable'] = 'No responses available.';
 $string['erroro365badphoto'] = 'Invalid profile photo received from Microsoft 365.';
 $string['erroro365nophoto'] = 'This user does not have a photo in Microsoft 365.';
 $string['errorcannotgetapiclient'] = 'Cannot get Graph API client.';
+$string['errorfailedtogetsecrets'] = 'Failed to get secrets.';
+$string['errorfailedtosendnotification'] = 'Failed to send notification email to one or more recipients.';
+$string['errorsecretexpiryrecipientundeliverable'] = 'One or more configured secret expiry notification recipients cannot receive email (invalid address, or a domain with no MX/A record): {$a}. Update the notification recipients in the OpenID Connect settings.';
 
 // Privacy API.
 $string['privacy:metadata:local_o365'] = 'Microsoft 365 Local Plugin';
@@ -818,6 +976,7 @@ $string['privacy:metadata:local_o365_appassign'] = 'Information about Microsoft 
 $string['privacy:metadata:local_o365_appassign:muserid'] = 'The ID of the Moodle user';
 $string['privacy:metadata:local_o365_appassign:assigned'] = 'Whether the user has been assigned to the app';
 $string['privacy:metadata:local_o365_appassign:photoid'] = 'The ID of the user\'s photo in Microsoft 365';
+$string['privacy:metadata:local_o365_appassign:photohash'] = 'A SHA-256 hash of the user\'s profile photo bytes, stored to detect photo changes without re-fetching the full image';
 $string['privacy:metadata:local_o365_appassign:photoupdated'] = 'When the user\'s photo was last updated from Microsoft 365';
 $string['privacy:metadata:local_o365_matchqueue'] = 'Information about Moodle user to Microsoft 365 user matching';
 $string['privacy:metadata:local_o365_matchqueue:musername'] = 'The username of the Moodle user.';
@@ -825,10 +984,12 @@ $string['privacy:metadata:local_o365_matchqueue:o365username'] = 'The username o
 $string['privacy:metadata:local_o365_matchqueue:openidconnect'] = 'Whether to switch the user to OpenID Connect authentication when the match is made';
 $string['privacy:metadata:local_o365_matchqueue:completed'] = 'Whether the record has been processed';
 $string['privacy:metadata:local_o365_matchqueue:errormessage'] = 'The error message (if any)';
+$string['privacy:metadata:preference:suspendedtime'] = 'The time the user was suspended by the user sync, either because the matching Microsoft Entra ID account was deleted or because it was disabled.';
 $string['privacy:metadata:local_o365_calsettings'] = 'Information about calendar sync settings';
 $string['privacy:metadata:local_o365_calsettings:user_id'] = 'The ID of the Moodle user';
 $string['privacy:metadata:local_o365_calsettings:o365calid'] = 'The ID of the calendar in Microsoft 365';
 $string['privacy:metadata:local_o365_calsettings:timecreated'] = 'The time the record was created.';
+$string['privacy:metadata:preference:calsync_initialised'] = 'Whether the user\'s Outlook calendar sync choices have been initialised, so they are not enabled automatically again.';
 
 // Page "Microsoft 365 / Moodle Control Panel" in the Microsoft block.
 $string['ucp_title'] = 'Microsoft 365 / Moodle Control Panel';
@@ -843,7 +1004,6 @@ $string['ucp_connection_stop'] = 'Disconnect from Microsoft 365';
 $string['ucp_connection_options'] = 'Connection Options:';
 $string['ucp_connection_desc'] = 'Here you can configure how you connect to Microsoft 365. To use Microsoft 365 features, you must be connected to a Microsoft 365 account. This can be accomplished as outlined below.';
 $string['ucp_connection_entraidlogin'] = 'Use your Microsoft 365 credentials to log in to Moodle<br />';
-$string['ucp_connection_entraidlogin_desc_rocreds'] = 'Instead of your Moodle username and password, you will enter your Microsoft 365 username and password on the Moodle login page.';
 $string['ucp_connection_entraidlogin_desc_authcode'] = 'Instead of entering a username and password on the Moodle login page, you will see a section that says "Login using your account on {$a}" on the login page. You will click the link and be redirected to Microsoft 365 to log in. After you have logged in to Microsoft 365 successfully, you will be returned to Moodle and logged in to your account.';
 $string['ucp_connection_entraidlogin_start'] = 'Start using Microsoft 365 to log in to Moodle.';
 $string['ucp_connection_entraidlogin_stop'] = 'Stop using Microsoft 365 to log in to Moodle.';
@@ -895,11 +1055,18 @@ $string['ucp_o365accountconnected'] = 'This Microsoft 365 account is already con
 $string['task_calendarsyncin'] = 'Sync Microsoft 365 events in to Moodle';
 $string['task_coursesync'] = 'Sync Moodle courses to Microsoft Teams';
 $string['task_coursemembershipsync'] = 'Sync Microsoft Teams owners and members to Moodle courses';
+$string['task_groupmembershipsync'] = 'Sync Moodle course owners and members to Microsoft 365 groups';
 $string['task_sds_sync'] = 'Sync with SDS';
 $string['task_syncusers'] = 'Sync users from Microsoft Entra ID';
+$string['task_syncusersphotostimezones'] = 'Sync user photos and timezones from Microsoft Entra ID';
+$string['task_calsyncautosubscribe'] = 'Automatically enable calendar sync for connected users';
+$string['task_groupchannelsync'] = 'Create Teams channels for Moodle groups and sync their members';
+$string['task_groupchannelsyncgroup'] = 'Create the Teams channel of a Moodle group and sync its members';
+$string['task_userenabledstatussync'] = 'Suspend/re-enable/delete users based on Microsoft Entra ID status';
 $string['task_processmatchqueue'] = 'Process Match Queue';
 $string['task_notifysecretexpiry'] = 'Notify site admin about Microsoft Entra ID app secret expiry';
 $string['task_checkinvalidconfiglog'] = 'Check and clean up invalid config log records';
+$string['task_usergroupmembershipsync'] = 'Sync user course group membership to Microsoft 365';
 $string['task_processmatchqueue_err_museralreadymatched'] = 'Moodle user is already matched to a Microsoft 365 user.';
 $string['task_processmatchqueue_err_museralreadyo365'] = 'Moodle user is already connected to Microsoft 365.';
 $string['task_processmatchqueue_err_nomuser'] = 'No Moodle user found with this username.';
@@ -910,6 +1077,7 @@ $string['task_processmatchqueue_err_o365useralreadyconnected'] = 'Microsoft 365 
 // Capabilities.
 $string['o365:manageconnectionlink'] = 'Manage Connection Link';
 $string['o365:manageconnectionunlink'] = 'Manage Connection Unlink';
+$string['o365:managecoursesync'] = 'Enable or disable Teams sync for courses via web services';
 $string['o365:viewgroups'] = 'View links to Microsoft 365 services in the Microsoft block in courses with sync enabled';
 $string['o365:managegroups'] = 'View links to Microsoft 365 services and management options in the Microsoft block in courses with sync enabled';
 $string['o365:teammember'] = 'Team member';
@@ -917,6 +1085,7 @@ $string['o365:teamowner'] = 'Team owner';
 
 // Cache Stores.
 $string['cachedef_groups'] = 'Stores Microsoft 365 group data';
+$string['cachedef_jwks'] = 'Stores Microsoft JWKS keys';
 
 // Web service errors.
 $string['webservices_error_assignnotfound'] = 'The received module\'s assignment record could not be found.';
@@ -933,15 +1102,27 @@ $string['help_user_update_help'] = 'This will update all users in Moodle from ea
 $string['help_user_suspend'] = 'Suspend Accounts Help';
 $string['help_user_suspend_help'] = 'This will suspend users from Moodle if they are marked as deleted in Microsoft Entra ID.';
 $string['help_user_delete'] = 'Delete Accounts Help';
-$string['help_user_delete_help'] = 'This will delete users from Moodle if they are marked as deleted in Microsoft Entra ID. This will only work if the suspend user option is enabled. The Moodle account will be deleted and all associated user information will be removed from Moodle. Be careful! Note: By default, deletion occurs 30 days after the account was deleted in Microsoft Entra ID due to Entra ID’s soft-delete retention period (accounts can be restored during this time).';
+$string['help_user_delete_help'] = 'This will delete users from Moodle if they are marked as deleted in Microsoft Entra ID. This will only work if the suspend user option is enabled. The Moodle account will be deleted and all associated user information will be removed from Moodle. Be careful! Note: By default, deletion occurs 30 days after the account was deleted in Microsoft Entra ID due to Entra ID’s soft-delete retention period (accounts can be restored during this time). A longer delay between suspension and deletion can be configured with the "Delay before deleting suspended users" setting.';
 $string['help_user_reenable'] = 'Re-enable Accounts Help';
-$string['help_user_reenable_help'] = 'This will re-enable suspended Moodle accounts if they are returned from Microsoft Entra ID.';
-$string['help_user_disabledsync'] = 'Sync disabled status help';
-$string['help_user_disabledsync_help'] = 'This will suspend/unsuspend users in Moodle if their connected accounts in Microsoft Entra ID are marked prevented/allowed from login.';
+$string['help_user_reenable_help'] = 'This will re-enable suspended Moodle accounts if they are returned from Microsoft Entra ID and are allowed to sign in. Accounts that are blocked from signing in (disabled) in Microsoft Entra ID will remain suspended.';
+$string['help_user_disabledsyncsuspend'] = 'Suspend Accounts On Disable Help';
+$string['help_user_disabledsyncsuspend_help'] = 'This will suspend users in Moodle if their connected accounts in Microsoft Entra ID are prevented from logging in (disabled), without changing whether they are automatically re-enabled if their Microsoft Entra ID account is enabled again. Use the "Re-enable accounts in Moodle when re-enabled in Microsoft Entra ID" option below to control that separately.';
+$string['help_user_groupsyncsuspend'] = 'Suspend Accounts Not In Sync Group Help';
+$string['help_user_groupsyncsuspend_help'] = 'This will suspend users in Moodle if they are still active in Microsoft Entra ID but are not members or owners of the group configured in the "User sync group filter" setting. The check is on current membership only: it also suspends existing synced users who were never in the group, not just users who left it, so review your group before enabling this option. This option is only available when a user sync group filter is configured. To avoid mass suspension, nothing is suspended if the group is found to be empty or its members cannot be retrieved. Suspended users are not re-enabled while they are not in the group.';
+$string['help_user_disabledsyncreenable'] = 'Re-enable Accounts On Enable Help';
+$string['help_user_disabledsyncreenable_help'] = 'This will unsuspend suspended users in Moodle if their connected accounts in Microsoft Entra ID are allowed to log in (enabled) again.';
+$string['help_user_suspendnolink'] = 'Suspend Accounts With No Microsoft Link Help';
+$string['help_user_suspendnolink_help'] = 'Normally the suspend/disable options above only act on accounts that have a stored Microsoft Entra ID object record (created when the account was synced or connected). Some OpenID Connect accounts have no such record - for example they connected before the Microsoft Graph API was configured, or the record was removed by a disconnect or a "clear matched users" action. This option makes the status task also check those accounts, matching the Moodle username against the configured binding username claim value in Entra ID.
+
+Matched accounts that are missing from Entra ID, or disabled there, are <strong>suspended only</strong>: they are never deleted (without a stored object ID, the Entra ID soft-delete retention period cannot be checked) and are never automatically re-enabled. Guest accounts are skipped.
+
+This option only works when the OpenID Connect binding username claim is set to a specific field that can be looked up in Entra ID - "upn", "oid", "email" or "samaccountname". With "auto" (where the effective claim is chosen per login and can differ between users) or any other claim, the Moodle username cannot be reliably matched to a single account, and this option does nothing.
+
+Review your suspended users after the first run: an account manually switched to this authentication method that was never a real Entra ID user will be suspended by this option.';
 $string['help_user_match'] = 'Match Accounts Help';
 $string['help_user_match_help'] = 'This will look at each user in the linked Microsoft Entra ID and try to match them with a user in Moodle. This match is based on Microsoft Entra ID UPN and Moodle username. Matches are case-insensitive and ignore the domain part of Microsoft Entra ID UPN. For example, "BoB.SmiTh" in Moodle would match "bob.smith@example.onmicrosoft.com". Users who are matched will have their Moodle and Microsoft Entra ID accounts connected and will be able to use all Microsoft 365 and Moodle integration features. The user\'s authentication method will not change unless the setting below is enabled.';
 $string['help_user_matchswitchauth'] = 'Switch Matched Accounts Help';
-$string['help_user_matchswitchauth_help'] = 'This requires the "Match preexisting Moodle users" setting above to be enabled. When a user is matched, enabling this setting will switch their authentication method to OpenID Connect. They will then be able to log in to Moodle with their Microsoft 365 credentials. Note: Please ensure that the OpenID Connect authentication plugin is enabled if you want to use this setting.';
+$string['help_user_matchswitchauth_help'] = 'This requires the "Match preexisting Moodle users" setting above to be enabled. When a user is matched, enabling this setting will switch their authentication method to OpenID Connect. They will then be able to log in to Moodle with their Microsoft 365 credentials. Note: Please ensure that the OpenID Connect authentication plugin is enabled if you want to use this setting. Warning: if a Moodle username only matches the part of the Microsoft Entra ID UPN before the "@" (rather than the full UPN), the "Minimum inexact username length to switch to Microsoft 365" advanced setting can prevent the authentication method from being switched for users with short usernames.';
 $string['help_user_appassign'] = 'Assign Users To Application Help';
 $string['help_user_appassign_help'] = 'This will cause all the Microsoft Entra ID accounts with matching Moodle accounts to be assigned to the Microsoft Entra ID app created for this Moodle installation, if not already assigned.';
 $string['help_user_photosync'] = 'Sync Microsoft 365 Profile Photos (Cron) Help';
@@ -966,16 +1147,22 @@ $string['cohortsync_mappingadded'] = 'New connection successfully added';
 $string['cohortsync_mappingdeleted'] = 'Connection successfully deleted';
 $string['cohortsync_addmapping'] = 'Add connection';
 $string['cohortsync_deletemapping'] = 'Delete connection';
-$string['cohortsync_desc'] = 'This page allows one-way synchronisation from Microsoft groups to Moodle cohorts at system level context. Adding a new connection will initiate the synchronization process - users from the selected Microsoft Group who are connected with Microsoft will be added in the selected Moodle Cohort.';
-$string['cohortsync_tabledesc'] = 'Current connections between Microsoft Groups and Moodle Cohorts';
-$string['cohortsync_emptygroups'] = 'No available Microsoft Groups';
-$string['cohortsync_emptycohorts'] = 'No available Moodle Cohorts';
+$string['cohortsync_desc'] = 'This page allows one-way synchronisation from Microsoft 365 groups to Moodle cohorts at system level context. Adding a new connection will initiate the synchronization process - users from the selected Microsoft 365 Group who are connected with Microsoft will be added in the selected Moodle Cohort.';
+$string['cohortsync_tabledesc'] = 'Current connections between Microsoft 365 Groups and Moodle Cohorts';
+$string['cohortsync_typetosearch'] = 'Type to search for a Microsoft 365 Group';
+$string['cohortsync_typetosearch_cohort'] = 'Type to search for a Moodle Cohort';
 $string['cohortsync_emptymatchings'] = 'No connections found';
 $string['cohortsync_select_cohort'] = 'Moodle cohort';
-$string['cohortsync_select_group'] = 'Microsoft Group';
-$string['cohortsync_tablehead_group'] = 'Microsoft Group';
+$string['cohortsync_select_group'] = 'Microsoft 365 Group';
+$string['cohortsync_tablehead_group'] = 'Microsoft 365 Group';
 $string['cohortsync_tablehead_cohort'] = 'Moodle Cohort';
 $string['cohortsync_tablehead_actions'] = 'Actions';
+$string['cohortsync_search'] = 'Search';
+$string['cohortsync_load_more'] = 'Load more...';
+$string['cohortsync_no_groups_found'] = 'No Microsoft 365 Groups found for "{$a}"';
+$string['cohortsync_no_cohorts_found'] = 'No Moodle Cohorts found for "{$a}"';
+$string['cohortsync_error_no_group'] = 'Please select a Microsoft 365 Group.';
+$string['cohortsync_error_no_cohort'] = 'Please select a Moodle Cohort.';
 $string['cohortsync_mappingfailed'] = 'Error adding cohort and group connection. Possible reasons: group or cohort does not exist, group is already connected to another cohort, group is already connected to this cohort.';
 $string['cohortsync_connectionnotfound'] = 'Invalid request: connection not found.';
 $string['cohortsync_connectionnotcohortsync'] = 'Invalid request: mismatch connection type.';
@@ -1020,8 +1207,23 @@ $string['notification_content_invalid_secret'] = 'Dear site administrator,
 The Microsoft Entra ID app secret used in your Moodle and Microsoft 365 integration seems to be invalid. This can either be caused by the secret expired, or it has been deleted.
 Please review the secret to ensure the integration works as expected.';
 
+// Async operations.
+$string['teamsasyncfailed'] = 'Team creation async operation failed: {$a}';
+$string['unknownasyncstate'] = 'Unknown async operation state: {$a}';
+
+// Template ID validation.
+$string['error_template_id_empty'] = 'Template ID cannot be empty.';
+$string['error_not_connected'] = 'Not connected to Microsoft 365. Please set up the Office 365 integration first.';
+$string['error_graph_client_not_available'] = 'Cannot connect to Microsoft Graph API. Please check your Office 365 integration setup.';
+$string['success_template_id_valid'] = '✓ Template ID "{$a}" is valid and accessible.';
+$string['error_template_id_not_found'] = '✗ Template ID "{$a}" was not found. Please verify the template ID in the Teams admin centre.';
+$string['error_template_validation_permission'] = '✗ Permission denied. The Office 365 account does not have permission to use this template. Check with your Teams administrator.';
+$string['error_template_validation_invalid_format'] = '✗ Template ID "{$a}" has an invalid format. Template IDs typically look like: com.microsoft.teams.template.custom_template_id';
+$string['error_template_validation_failed'] = '✗ Template validation failed: {$a}';
+$string['error_template_validation_error'] = '✗ An error occurred while validating the template. Please try again or contact your administrator.';
+$string['error_template_validation_generic'] = '✗ Cannot validate template due to an error: {$a} Please check the template ID format and try again. If the problem persists, contact your administrator.';
+
 // Misc.
 $string['spsite_group_contributors_desc'] = 'All users who have access to manage files for course {$a}';
-
 // phpcs:enable moodle.Files.LangFilesOrdering.IncorrectOrder
 // phpcs:enable moodle.Files.LangFilesOrdering.UnexpectedComment

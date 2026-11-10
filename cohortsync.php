@@ -23,20 +23,21 @@
  * @license     http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
-require_once(__DIR__ . '/../../config.php');
-
-require_once($CFG->libdir . '/adminlib.php');
-
+use core\context\system;
+use core\url;
 use local_o365\feature\cohortsync\main;
 use local_o365\form\cohortsync;
 
-require_login();
-require_capability('moodle/site:config', context_system::instance());
+require_once(__DIR__ . '/../../config.php');
+require_once($CFG->libdir . '/adminlib.php');
 
-$pageurl = new moodle_url('/local/o365/cohortsync.php');
+require_login();
+require_capability('moodle/site:config', system::instance());
+
+$pageurl = new url('/local/o365/cohortsync.php');
 
 $PAGE->set_url($pageurl);
-$PAGE->set_context(context_system::instance());
+$PAGE->set_context(system::instance());
 $PAGE->set_title(get_string('cohortsync_title', 'local_o365'));
 $PAGE->set_pagelayout('admin');
 $PAGE->set_heading(get_string('cohortsync_title', 'local_o365'));
@@ -44,26 +45,30 @@ $PAGE->set_heading(get_string('cohortsync_title', 'local_o365'));
 $PAGE->set_primary_active_tab('siteadminnode');
 $PAGE->set_secondary_active_tab('modules');
 
-$PAGE->navbar->add(get_string('administrationsite'), new moodle_url('/admin/search.php'));
-$PAGE->navbar->add(get_string('localplugins'), new moodle_url('/admin/category.php', ['category' => 'localplugins']));
-$PAGE->navbar->add(get_string('pluginname', 'local_o365'), new moodle_url('/admin/settings.php', ['section' => 'local_o365']));
-$PAGE->navbar->add(get_string('settings_cohortsync_title', 'local_o365'), new moodle_url('/local/o365/cohortsync.php'));
+$PAGE->navbar->add(get_string('administrationsite'), new url('/admin/search.php'));
+$PAGE->navbar->add(get_string('localplugins'), new url('/admin/category.php', ['category' => 'localplugins']));
+$PAGE->navbar->add(get_string('pluginname', 'local_o365'), new url('/admin/settings.php', ['section' => 'local_o365']));
+$PAGE->navbar->add(get_string('settings_cohortsync_title', 'local_o365'), new url('/local/o365/cohortsync.php'));
 
 $apiclient = main::get_unified_api(__METHOD__);
 if (empty($apiclient)) {
     throw new moodle_exception('cohortsync_unifiedapierror', 'local_o365');
 }
+
 $cohortsyncmain = new main($apiclient);
 $cohortsyncmain->fetch_groups_from_cache();
 
 $cohortsyncform = new cohortsync(null, ['cohortsyncmain' => $cohortsyncmain]);
+$PAGE->requires->js_call_amd('local_o365/cohortsync_form', 'init');
 
 $action = optional_param('action', '', PARAM_ALPHA);
 if ($action == 'delete') {
+    require_sesskey();
     $connectionid = required_param('connectionid', PARAM_INT);
     if (!$connectionrecord = $DB->get_record('local_o365_objects', ['id' => $connectionid])) {
         throw new moodle_exception('cohortsync_connectionnotfound', 'local_o365');
     }
+
     if ($connectionrecord->type != 'group' || $connectionrecord->subtype != 'cohort') {
         throw new moodle_exception('cohortsync_connectionnotcohortsync', 'local_o365');
     }
@@ -75,7 +80,7 @@ if ($action == 'delete') {
 
 if ($fromform = $cohortsyncform->get_data()) {
     $groupoid = $fromform->groupoid;
-    $cohortid = $fromform->cohortid;
+    $cohortid = (int) $fromform->cohortid;
 
     if ($cohortsyncmain->add_mapping($groupoid, $cohortid)) {
         redirect($pageurl, get_string('cohortsync_mappingadded', 'local_o365'));

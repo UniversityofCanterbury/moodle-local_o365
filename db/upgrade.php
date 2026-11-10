@@ -24,12 +24,12 @@
  * @copyright (C) 2014 onwards Microsoft, Inc. (http://microsoft.com/)
  */
 
-use local_o365\feature\cohortsync\main;
 use local_o365\utils;
 
 defined('MOODLE_INTERNAL') || die();
 
 require_once($CFG->dirroot . '/local/o365/lib.php');
+require_once($CFG->dirroot . '/auth/oidc/lib.php');
 
 /**
  * Update plugin.
@@ -44,18 +44,21 @@ function xmldb_local_o365_upgrade($oldversion) {
 
     if ($oldversion < 2014111700) {
         if (!$dbman->table_exists('local_o365_token')) {
-            $dbman->install_one_table_from_xmldb_file(__DIR__.'/install.xml', 'local_o365_token');
+            $dbman->install_one_table_from_xmldb_file(__DIR__ . '/install.xml', 'local_o365_token');
         }
+
         upgrade_plugin_savepoint(true, 2014111700, 'local', 'o365');
     }
 
     if ($oldversion < 2014111702) {
         if (!$dbman->table_exists('local_o365_calsub')) {
-            $dbman->install_one_table_from_xmldb_file(__DIR__.'/install.xml', 'local_o365_calsub');
+            $dbman->install_one_table_from_xmldb_file(__DIR__ . '/install.xml', 'local_o365_calsub');
         }
+
         if (!$dbman->table_exists('local_o365_calidmap')) {
-            $dbman->install_one_table_from_xmldb_file(__DIR__.'/install.xml', 'local_o365_calidmap');
+            $dbman->install_one_table_from_xmldb_file(__DIR__ . '/install.xml', 'local_o365_calidmap');
         }
+
         upgrade_plugin_savepoint(true, 2014111702, 'local', 'o365');
     }
 
@@ -68,21 +71,25 @@ function xmldb_local_o365_upgrade($oldversion) {
 
     if ($oldversion < 2014111707) {
         if (!$dbman->table_exists('local_o365_cronqueue')) {
-            $dbman->install_one_table_from_xmldb_file(__DIR__.'/install.xml', 'local_o365_cronqueue');
+            $dbman->install_one_table_from_xmldb_file(__DIR__ . '/install.xml', 'local_o365_cronqueue');
         }
+
         upgrade_plugin_savepoint(true, 2014111707, 'local', 'o365');
     }
 
     if ($oldversion < 2014111710) {
         if (!$dbman->table_exists('local_o365_coursespsite')) {
-            $dbman->install_one_table_from_xmldb_file(__DIR__.'/install.xml', 'local_o365_coursespsite');
+            $dbman->install_one_table_from_xmldb_file(__DIR__ . '/install.xml', 'local_o365_coursespsite');
         }
+
         if (!$dbman->table_exists('local_o365_spgroupdata')) {
-            $dbman->install_one_table_from_xmldb_file(__DIR__.'/install.xml', 'local_o365_spgroupdata');
+            $dbman->install_one_table_from_xmldb_file(__DIR__ . '/install.xml', 'local_o365_spgroupdata');
         }
+
         if (!$dbman->table_exists('local_o365_aaduserdata')) {
-            $dbman->install_one_table_from_xmldb_file(__DIR__.'/install.xml', 'local_o365_aaduserdata');
+            $dbman->install_one_table_from_xmldb_file(__DIR__ . '/install.xml', 'local_o365_aaduserdata');
         }
+
         upgrade_plugin_savepoint(true, 2014111710, 'local', 'o365');
     }
 
@@ -92,13 +99,15 @@ function xmldb_local_o365_upgrade($oldversion) {
         if (!$dbman->field_exists($table, $field)) {
             $dbman->add_field($table, $field);
         }
+
         upgrade_plugin_savepoint(true, 2014111711, 'local', 'o365');
     }
 
     if ($oldversion < 2014111715) {
         if (!$dbman->table_exists('local_o365_spgroupassign')) {
-            $dbman->install_one_table_from_xmldb_file(__DIR__.'/install.xml', 'local_o365_spgroupassign');
+            $dbman->install_one_table_from_xmldb_file(__DIR__ . '/install.xml', 'local_o365_spgroupassign');
         }
+
         upgrade_plugin_savepoint(true, 2014111715, 'local', 'o365');
     }
 
@@ -129,10 +138,11 @@ function xmldb_local_o365_upgrade($oldversion) {
         // Migrate settings.
         $config = get_config('local_o365');
         if (empty($config->sharepointlink) && isset($config->tenant) && isset($config->parentsiteuri)) {
-            $sharepointlink = 'https://'.$config->tenant.'.sharepoint.com/'.$config->parentsiteuri;
+            $sharepointlink = 'https://' . $config->tenant . '.sharepoint.com/' . $config->parentsiteuri;
             add_to_config_log('sharepointlink', '', $sharepointlink, 'local_o365');
             set_config('sharepointlink', $sharepointlink, 'local_o365');
         }
+
         upgrade_plugin_savepoint(true, 2015012702, 'local', 'o365');
     }
 
@@ -140,16 +150,19 @@ function xmldb_local_o365_upgrade($oldversion) {
         $config = get_config('local_o365');
         if (!empty($config->tenant)) {
             $existingaadtenantsetting = get_config('local_o365', 'aadtenant');
-            if ($existingaadtenantsetting != $config->tenant.'.onmicrosoft.com') {
-                add_to_config_log('aadtenant', $existingaadtenantsetting, $config->tenant.'.onmicrosoft.com', 'local_o365');
+            if ($existingaadtenantsetting != $config->tenant . '.onmicrosoft.com') {
+                add_to_config_log('aadtenant', $existingaadtenantsetting, $config->tenant . '.onmicrosoft.com', 'local_o365');
             }
-            set_config('aadtenant', $config->tenant.'.onmicrosoft.com', 'local_o365');
+
+            set_config('aadtenant', $config->tenant . '.onmicrosoft.com', 'local_o365');
             $existingobdurlsetting = get_config('local_o365', 'odburl');
-            if ($existingobdurlsetting != $config->tenant.'-my.sharepoint.com') {
-                add_to_config_log('odburl', $existingobdurlsetting, $config->tenant.'-my.sharepoint.com', 'local_o365');
+            if ($existingobdurlsetting != $config->tenant . '-my.sharepoint.com') {
+                add_to_config_log('odburl', $existingobdurlsetting, $config->tenant . '-my.sharepoint.com', 'local_o365');
             }
-            set_config('odburl', $config->tenant.'-my.sharepoint.com', 'local_o365');
+
+            set_config('odburl', $config->tenant . '-my.sharepoint.com', 'local_o365');
         }
+
         upgrade_plugin_savepoint(true, 2015012704, 'local', 'o365');
     }
 
@@ -159,10 +172,12 @@ function xmldb_local_o365_upgrade($oldversion) {
         if (!$dbman->field_exists($table, $field)) {
             $dbman->add_field($table, $field);
         }
+
         $field = new xmldb_field('syncbehav', XMLDB_TYPE_CHAR, '255', null, XMLDB_NOTNULL, null, null, 'o365calid');
         if (!$dbman->field_exists($table, $field)) {
             $dbman->add_field($table, $field);
         }
+
         upgrade_plugin_savepoint(true, 2015012707, 'local', 'o365');
     }
 
@@ -175,13 +190,14 @@ function xmldb_local_o365_upgrade($oldversion) {
 
         $idmaps = $DB->get_recordset('local_o365_calidmap');
         foreach ($idmaps as $idmap) {
-            $newidmap = new \stdClass;
+            $newidmap = new \stdClass();
             $newidmap->id = $idmap->id;
             if (empty($idmap->origin)) {
                 $newidmap->origin = 'moodle';
                 $DB->update_record('local_o365_calidmap', $newidmap);
             }
         }
+
         $idmaps->close();
 
         upgrade_plugin_savepoint(true, 2015012708, 'local', 'o365');
@@ -208,13 +224,14 @@ function xmldb_local_o365_upgrade($oldversion) {
                   JOIN {event} ev ON idmap.eventid = ev.id';
         $idmaps = $DB->get_recordset_sql($sql);
         foreach ($idmaps as $idmap) {
-            $newidmap = new \stdClass;
+            $newidmap = new \stdClass();
             if (empty($idmap->userid)) {
                 $newidmap->id = $idmap->idmapid;
                 $newidmap->userid = $idmap->eventuserid;
                 $DB->update_record('local_o365_calidmap', $newidmap);
             }
         }
+
         $idmaps->close();
 
         upgrade_plugin_savepoint(true, 2015012709, 'local', 'o365');
@@ -224,12 +241,13 @@ function xmldb_local_o365_upgrade($oldversion) {
         $calsubs = $DB->get_recordset('local_o365_calsub');
         foreach ($calsubs as $i => $calsub) {
             if (empty($calsub->syncbehav)) {
-                $newcalsub = new \stdClass;
+                $newcalsub = new \stdClass();
                 $newcalsub->id = $calsub->id;
                 $newcalsub->syncbehav = 'out';
                 $DB->update_record('local_o365_calsub', $newcalsub);
             }
         }
+
         $calsubs->close();
         upgrade_plugin_savepoint(true, 2015012710, 'local', 'o365');
     }
@@ -244,8 +262,9 @@ function xmldb_local_o365_upgrade($oldversion) {
 
     if ($oldversion < 2015012713) {
         if (!$dbman->table_exists('local_o365_objects')) {
-            $dbman->install_one_table_from_xmldb_file(__DIR__.'/install.xml', 'local_o365_objects');
+            $dbman->install_one_table_from_xmldb_file(__DIR__ . '/install.xml', 'local_o365_objects');
         }
+
         upgrade_plugin_savepoint(true, 2015012713, 'local', 'o365');
     }
 
@@ -255,6 +274,7 @@ function xmldb_local_o365_upgrade($oldversion) {
         if (!$dbman->field_exists($table, $field)) {
             $dbman->add_field($table, $field);
         }
+
         upgrade_plugin_savepoint(true, 2015012714, 'local', 'o365');
     }
 
@@ -272,13 +292,15 @@ function xmldb_local_o365_upgrade($oldversion) {
             add_to_config_log('aadsync', '1', 'create', 'local_o365');
             set_config('aadsync', 'create', 'local_o365');
         }
+
         upgrade_plugin_savepoint(true, 2015060102, 'local', 'o365');
     }
 
     if ($oldversion < 2015060103) {
         if (!$dbman->table_exists('local_o365_connections')) {
-            $dbman->install_one_table_from_xmldb_file(__DIR__.'/install.xml', 'local_o365_connections');
+            $dbman->install_one_table_from_xmldb_file(__DIR__ . '/install.xml', 'local_o365_connections');
         }
+
         upgrade_plugin_savepoint(true, 2015060103, 'local', 'o365');
     }
 
@@ -288,6 +310,7 @@ function xmldb_local_o365_upgrade($oldversion) {
         if (!$dbman->field_exists($table, $field)) {
             $dbman->add_field($table, $field);
         }
+
         upgrade_plugin_savepoint(true, 2015060104, 'local', 'o365');
     }
 
@@ -311,6 +334,7 @@ function xmldb_local_o365_upgrade($oldversion) {
                 }
             }
         }
+
         upgrade_plugin_savepoint(true, 2015060109, 'local', 'o365');
     }
 
@@ -339,6 +363,7 @@ function xmldb_local_o365_upgrade($oldversion) {
                 if ($existingfieldmapsetting != serialize($fieldmapdefault)) {
                     add_to_config_log('fieldmap', $existingfieldmapsetting, serialize($fieldmapdefault), 'local_o365');
                 }
+
                 set_config('fieldmap', serialize($fieldmapdefault), 'local_o365');
             }
         }
@@ -349,16 +374,18 @@ function xmldb_local_o365_upgrade($oldversion) {
     if ($oldversion < 2015111900.02) {
         $table = new xmldb_table('local_o365_appassign');
         if (!$dbman->table_exists($table)) {
-            $dbman->install_one_table_from_xmldb_file(__DIR__.'/install.xml', 'local_o365_appassign');
+            $dbman->install_one_table_from_xmldb_file(__DIR__ . '/install.xml', 'local_o365_appassign');
         }
+
         upgrade_plugin_savepoint(true, 2015111900.02, 'local', 'o365');
     }
 
     if ($oldversion < 2015111901.01) {
         $table = new xmldb_table('local_o365_matchqueue');
         if (!$dbman->table_exists($table)) {
-            $dbman->install_one_table_from_xmldb_file(__DIR__.'/install.xml', 'local_o365_matchqueue');
+            $dbman->install_one_table_from_xmldb_file(__DIR__ . '/install.xml', 'local_o365_matchqueue');
         }
+
         upgrade_plugin_savepoint(true, 2015111901.01, 'local', 'o365');
     }
 
@@ -369,15 +396,18 @@ function xmldb_local_o365_upgrade($oldversion) {
         if (!$dbman->index_exists($table, $index)) {
             $dbman->add_index($table, $index);
         }
+
         $table = new xmldb_table('local_o365_matchqueue');
         $index = new xmldb_index('completed', XMLDB_INDEX_NOTUNIQUE, ['completed']);
         if (!$dbman->index_exists($table, $index)) {
             $dbman->add_index($table, $index);
         }
+
         $index = new xmldb_index('o365username', XMLDB_INDEX_NOTUNIQUE, ['o365username']);
         if (!$dbman->index_exists($table, $index)) {
             $dbman->add_index($table, $index);
         }
+
         upgrade_plugin_savepoint(true, 2015111901.03, 'local', 'o365');
     }
 
@@ -387,18 +417,22 @@ function xmldb_local_o365_upgrade($oldversion) {
         if ($dbman->index_exists($table, $index)) {
             $dbman->drop_index($table, $index);
         }
+
         $field = new xmldb_field('userobjectid', XMLDB_TYPE_CHAR, '255', null, null, null, null, 'muserid');
         if ($dbman->field_exists($table, $field)) {
             $dbman->drop_field($table, $field);
         }
+
         $field = new xmldb_field('photoid', XMLDB_TYPE_CHAR, '255', null, null, null, null, 'assigned');
         if (!$dbman->field_exists($table, $field)) {
             $dbman->add_field($table, $field);
         }
+
         $field = new xmldb_field('photoupdated', XMLDB_TYPE_INTEGER, '10', null, null, null, null, 'photoid');
         if (!$dbman->field_exists($table, $field)) {
             $dbman->add_field($table, $field);
         }
+
         upgrade_plugin_savepoint(true, 2015111903, 'local', 'o365');
     }
 
@@ -409,6 +443,7 @@ function xmldb_local_o365_upgrade($oldversion) {
             $DB->delete_records('user_info_data', ['fieldid' => $field->id]);
             $DB->delete_records('user_info_field', ['id' => $field->id]);
         }
+
         upgrade_plugin_savepoint(true, 2015111905, 'local', 'o365');
     }
 
@@ -419,13 +454,15 @@ function xmldb_local_o365_upgrade($oldversion) {
             $field->setNotNull(false);
             $dbman->change_field_notnull($table, $field);
         }
+
         upgrade_plugin_savepoint(true, 2015111911.01, 'local', 'o365');
     }
 
     if ($oldversion < 2015111913) {
         if (!$dbman->table_exists('local_o365_coursegroupdata')) {
-            $dbman->install_one_table_from_xmldb_file(__DIR__.'/install.xml', 'local_o365_coursegroupdata');
+            $dbman->install_one_table_from_xmldb_file(__DIR__ . '/install.xml', 'local_o365_coursegroupdata');
         }
+
         upgrade_plugin_savepoint(true, 2015111913, 'local', 'o365');
     }
 
@@ -436,8 +473,10 @@ function xmldb_local_o365_upgrade($oldversion) {
             if ($existingcreategroupssetting != 'onall') {
                 add_to_config_log('creategroups', $existingcreategroupssetting, 'onall', 'local_o365');
             }
+
             set_config('creategroups', 'onall', 'local_o365');
         }
+
         upgrade_plugin_savepoint(true, 2015111913.02, 'local', 'o365');
     }
 
@@ -516,6 +555,7 @@ function xmldb_local_o365_upgrade($oldversion) {
         if ($existingsharepointcourseselectsetting != 'off') {
             add_to_config_log('sharepointcourseselect', $existingsharepointcourseselectsetting, 'off', 'local_o365');
         }
+
         set_config('sharepointcourseselect', 'off', 'local_o365');
         upgrade_plugin_savepoint(true, 2016062000.01, 'local', 'o365');
     }
@@ -538,17 +578,23 @@ function xmldb_local_o365_upgrade($oldversion) {
                         $newrolecap = $rolecap;
                         unset($newrolecap->id);
                         foreach ($addcaps as $addcap) {
-                            if (!$DB->record_exists('role_capabilities',
-                                ['roleid' => $role->id, 'capability' => $addcap, 'contextid' => $newrolecap->contextid])) {
+                            if (
+                                !$DB->record_exists(
+                                    'role_capabilities',
+                                    ['roleid' => $role->id, 'capability' => $addcap, 'contextid' => $newrolecap->contextid]
+                                )
+                            ) {
                                 $newrolecap->capability = $addcap;
                                 $DB->insert_record('role_capabilities', $newrolecap);
                             }
                         }
                     }
+
                     unset($rolecaps);
                 }
             }
         }
+
         upgrade_plugin_savepoint(true, 2016062000.02, 'local', 'o365');
     }
 
@@ -560,6 +606,7 @@ function xmldb_local_o365_upgrade($oldversion) {
                 $dbman->add_field($table, $field);
             }
         }
+
         upgrade_plugin_savepoint(true, 2016062000.03, 'local', 'o365');
     }
 
@@ -573,6 +620,7 @@ function xmldb_local_o365_upgrade($oldversion) {
             add_to_config_log('sharepointcourseselect', $sharepointcourseselect, 'none', 'local_o365');
             set_config('sharepointcourseselect', 'none', 'local_o365');
         }
+
         upgrade_plugin_savepoint(true, 2016062001.01, 'local', 'o365');
     }
 
@@ -583,13 +631,16 @@ function xmldb_local_o365_upgrade($oldversion) {
             if ($disablegraphapi != 1) {
                 add_to_config_log('disablegraphapi', $disablegraphapi, '1', 'local_o365');
             }
+
             set_config('disablegraphapi', 1, 'local_o365');
         } else {
             if ($disablegraphapi != 0) {
                 add_to_config_log('disablegraphapi', $disablegraphapi, '0', 'local_o365');
             }
+
             set_config('disablegraphapi', 0, 'local_o365');
         }
+
         upgrade_plugin_savepoint(true, 2016062004.01, 'local', 'o365');
     }
 
@@ -601,6 +652,7 @@ function xmldb_local_o365_upgrade($oldversion) {
                 $dbman->add_field($table, $field);
             }
         }
+
         upgrade_plugin_savepoint(true, 2016120500.05, 'local', 'o365');
     }
 
@@ -612,6 +664,7 @@ function xmldb_local_o365_upgrade($oldversion) {
                 $dbman->add_field($table, $field);
             }
         }
+
         upgrade_plugin_savepoint(true, 2016120500.06, 'local', 'o365');
     }
 
@@ -626,6 +679,7 @@ function xmldb_local_o365_upgrade($oldversion) {
         if ($existingcreateteamssetting != $coursesyncsetting) {
             add_to_config_log('createteams', $existingcreateteamssetting, $coursesyncsetting, 'local_o365');
         }
+
         set_config('createteams', $coursesyncsetting, 'local_o365');
         upgrade_plugin_savepoint(true, 2018051702, 'local', 'o365');
     }
@@ -655,9 +709,11 @@ function xmldb_local_o365_upgrade($oldversion) {
                 foreach ($fieldmapsettings as $key => $setting) {
                     $fieldmapsettings[$key] = str_replace('facsimileTelephoneNumber', 'faxNumber', $setting);
                 }
+
                 if ($originalfieldmapsettings != serialize($fieldmapsettings)) {
                     add_to_config_log('fieldmap', $originalfieldmapsettings, serialize($fieldmapsettings), 'local_o365');
                 }
+
                 set_config('fieldmap', serialize($fieldmapsettings), 'local_o365');
             }
         }
@@ -733,10 +789,12 @@ function xmldb_local_o365_upgrade($oldversion) {
                     unset($apptokensconfig[$resource]['resource']);
                 }
             }
+
             $apptokensconfig = serialize($apptokensconfig);
             if ($originalfieldmapsettings != $apptokensconfig) {
                 add_to_config_log('apptokens', $originalapptokensconfig, $apptokensconfig, 'local_o365');
             }
+
             set_config('apptokens', $apptokensconfig, 'local_o365');
         }
 
@@ -750,15 +808,18 @@ function xmldb_local_o365_upgrade($oldversion) {
                 if (!is_array($tokenconfig)) {
                     continue;
                 }
+
                 if (array_key_exists('resource', $tokenconfig)) {
                     $systemtokensconfig[$resource]['tokenresource'] = $tokenconfig['resource'];
                     unset($systemtokensconfig[$resource]['resource']);
                 }
             }
+
             $systemtokensconfig = serialize($systemtokensconfig);
             if ($originalfieldmapsettings != $systemtokensconfig) {
                 add_to_config_log('systemtokens', $originalfieldmapsettings, $systemtokensconfig, 'local_o365');
             }
+
             set_config('systemtokens', $systemtokensconfig, 'local_o365');
         }
 
@@ -773,10 +834,11 @@ function xmldb_local_o365_upgrade($oldversion) {
         if ($aadsyncsetting != $newaadsyncsetting) {
             add_to_config_log('aadsync', $aadsyncsetting, $newaadsyncsetting, 'local_o365');
         }
+
         set_config('aadsync', $newaadsyncsetting, 'local_o365');
 
         // Force clear user sync delta token.
-        unset_config('local_o365', 'task_usersync_lastdeltatoken');
+        unset_config('task_usersync_lastdeltatoken', 'local_o365');
         purge_all_caches();
 
         // O365 savepoint reached.
@@ -795,9 +857,14 @@ function xmldb_local_o365_upgrade($oldversion) {
         // Update "task_usersync_lastdelete" setting from timestamp to YYYYMMDD.
         $existingtaskusersynclastdeletesetting = get_config('local_o365', 'task_usersync_lastdelete');
         if ($existingtaskusersynclastdeletesetting != date('Ymd', strtotime('yesterday'))) {
-            add_to_config_log('task_usersync_lastdelete', $existingtaskusersynclastdeletesetting,
-                date('Ymd', strtotime('yesterday')), 'local_o365');
+            add_to_config_log(
+                'task_usersync_lastdelete',
+                $existingtaskusersynclastdeletesetting,
+                date('Ymd', strtotime('yesterday')),
+                'local_o365'
+            );
         }
+
         set_config('task_usersync_lastdelete', date('Ymd', strtotime('yesterday')), 'local_o365');
 
         // O365 savepoint reached.
@@ -836,6 +903,7 @@ function xmldb_local_o365_upgrade($oldversion) {
         if ($existingcalsyncinlastrunsetting != 0) {
             add_to_config_log('calsyncinlastrun', $existingcalsyncinlastrunsetting, 0, 'local_o365');
         }
+
         set_config('calsyncinlastrun', 0, 'local_o365');
 
         // O365 savepoint reached.
@@ -850,6 +918,7 @@ function xmldb_local_o365_upgrade($oldversion) {
         if ($dbman->table_exists($table)) {
             $dbman->drop_table($table);
         }
+
         $table = new xmldb_table('local_o365_groupdata');
         if ($dbman->table_exists($table)) {
             $dbman->drop_table($table);
@@ -861,6 +930,7 @@ function xmldb_local_o365_upgrade($oldversion) {
                 add_to_config_log('coursesync', '', $pluginsettings->createteams, 'local_o365');
                 set_config('coursesync', $pluginsettings->createteams, 'local_o365');
             }
+
             unset_config('createteams', 'local_o365');
         }
 
@@ -870,6 +940,7 @@ function xmldb_local_o365_upgrade($oldversion) {
                 add_to_config_log('coursesynccustom', '', $pluginsettings->usergroupcustom, 'local_o365');
                 set_config('coursesynccustom', $pluginsettings->usergroupcustom, 'local_o365');
             }
+
             unset_config('usergroupcustom', 'local_o365');
         }
 
@@ -879,6 +950,7 @@ function xmldb_local_o365_upgrade($oldversion) {
                 add_to_config_log('coursesynccustomfeatures', '', $pluginsettings->usergroupcustomfeatures, 'local_o365');
                 set_config('coursesynccustomfeatures', $pluginsettings->usergroupcustomfeatures, 'local_o365');
             }
+
             unset_config('usergroupcustomfeatures', 'local_o365');
         }
 
@@ -888,6 +960,7 @@ function xmldb_local_o365_upgrade($oldversion) {
                 add_to_config_log('course_sync_per_course', '', $pluginsettings->createteams_per_course, 'local_o365');
                 set_config('course_sync_per_course', $pluginsettings->createteams_per_course, 'local_o365');
             }
+
             unset_config('createteams_per_course', 'local_o365');
         }
 
@@ -913,17 +986,20 @@ function xmldb_local_o365_upgrade($oldversion) {
             if ($existingeducationgroupparamssetsetting != $now) {
                 add_to_config_log('education_group_params_set', $existingeducationgroupparamssetsetting, $now, 'local_o365');
             }
+
             set_config('education_group_params_set', $now, 'local_o365');
             local_o365\feature\coursesync\utils::migrate_existing_groups();
         }
 
         // Define field locked to be added to local_o365_teams_cache.
         $table = new xmldb_table('local_o365_teams_cache');
-        $field = new xmldb_field('locked', XMLDB_TYPE_INTEGER, '1', null, null, null, null, 'url');
+        if ($dbman->table_exists($table)) {
+            $field = new xmldb_field('locked', XMLDB_TYPE_INTEGER, '1', null, null, null, null, 'url');
 
-        // Conditionally launch add field locked.
-        if (!$dbman->field_exists($table, $field)) {
-            $dbman->add_field($table, $field);
+            // Conditionally launch add field locked.
+            if (!$dbman->field_exists($table, $field)) {
+                $dbman->add_field($table, $field);
+            }
         }
 
         // O365 savepoint reached.
@@ -1026,16 +1102,9 @@ function xmldb_local_o365_upgrade($oldversion) {
             $dbman->create_table($table);
         }
 
-        // Update groups cache.
-        try {
-            $graphclient = main::get_unified_api(__METHOD__);
-            if ($graphclient) {
-                utils::update_groups_cache($graphclient);
-            }
-        } catch (moodle_exception $e) {
-            // Do nothing.
-            debugging('Error updating groups cache: ' . $e->getMessage());
-        }
+        // The groups cache is populated automatically by the coursesync and cohortsync scheduled tasks,
+        // so it is not warmed up here. Doing so could trigger a slow, tenant-wide Microsoft Graph API
+        // sync during upgrade even when neither feature is enabled.
 
         // O365 savepoint reached.
         upgrade_plugin_savepoint(true, 2023100901, 'local', 'o365');
@@ -1061,6 +1130,7 @@ function xmldb_local_o365_upgrade($oldversion) {
         if (!$dbman->table_exists($table)) {
             $dbman->create_table($table);
         }
+
         // O365 savepoint reached.
         upgrade_plugin_savepoint(true, 2023100902, 'local', 'o365');
     }
@@ -1085,11 +1155,13 @@ function xmldb_local_o365_upgrade($oldversion) {
                     $teacherroleid = reset($editingteacherroles)->id;
                 }
             }
+
             if ($teacherroleid) {
                 $existingcoursesyncownerrolesetting = get_config('local_o365', 'coursesyncownerrole');
                 if ($existingcoursesyncownerrolesetting != $teacherroleid) {
                     add_to_config_log('coursesyncownerrole', $existingcoursesyncownerrolesetting, $teacherroleid, 'local_o365');
                 }
+
                 set_config('coursesyncownerrole', $teacherroleid, 'local_o365');
             }
         }
@@ -1106,11 +1178,13 @@ function xmldb_local_o365_upgrade($oldversion) {
                     $studentroleid = reset($studentroles)->id;
                 }
             }
+
             if ($studentroleid) {
                 $existingcoursesyncmemberrolesetting = get_config('local_o365', 'coursesyncmemberrole');
                 if ($existingcoursesyncmemberrolesetting != $studentroleid) {
                     add_to_config_log('coursesyncmemberrole', $existingcoursesyncmemberrolesetting, $studentroleid, 'local_o365');
                 }
+
                 set_config('coursesyncmemberrole', $studentroleid, 'local_o365');
             }
         }
@@ -1150,6 +1224,7 @@ function xmldb_local_o365_upgrade($oldversion) {
                 if ($newconfigsetting != $config) {
                     add_to_config_log($newconfigname, $newconfigsetting, $config, 'local_o365');
                 }
+
                 set_config($newconfigname, $config, 'local_o365');
                 unset_config($originalconfigname, 'local_o365');
             }
@@ -1233,11 +1308,13 @@ function xmldb_local_o365_upgrade($oldversion) {
                 if ($originalcalsyncinlastrun != $calsyncinlastrun) {
                     add_to_config_log('calsyncinlastrun', $originalcalsyncinlastrun, $calsyncinlastrun, 'local_o365');
                 }
+
                 set_config('calsyncinlastrun', $calsyncinlastrun, 'local_o365');
             } else {
                 if ($originalcalsyncinlastrun != 0) {
                     add_to_config_log('calsyncinlastrun', $originalcalsyncinlastrun, 0, 'local_o365');
                 }
+
                 set_config('calsyncinlastrun', 0, 'local_o365');
             }
         }
@@ -1260,31 +1337,55 @@ function xmldb_local_o365_upgrade($oldversion) {
     if ($oldversion < 2024042202) {
         // Changing precision of field objectid on table local_o365_groups_cache to (36).
         $table = new xmldb_table('local_o365_groups_cache');
-        $field = new xmldb_field('objectid', XMLDB_TYPE_CHAR, '36', null, XMLDB_NOTNULL, null, null, 'id');
-
-        // Launch change of precision for field objectid.
-        $dbman->change_field_precision($table, $field);
+        $groupscachecolumns = $DB->get_columns('local_o365_groups_cache');
+        if (isset($groupscachecolumns['objectid']) && $groupscachecolumns['objectid']->max_length != 36) {
+            // Drop the objectid index first if it exists, as precision change cannot be made to indexed fields.
+            $index = new xmldb_index('objectid', XMLDB_INDEX_NOTUNIQUE, ['objectid']);
+            if ($dbman->index_exists($table, $index)) {
+                $dbman->drop_index($table, $index);
+            }
+            $field = new xmldb_field('objectid', XMLDB_TYPE_CHAR, '36', null, XMLDB_NOTNULL, null, null, 'id');
+            // Launch change of precision for field objectid.
+            $dbman->change_field_precision($table, $field);
+            // Recreate the objectid index after precision change.
+            if (!$dbman->index_exists($table, $index)) {
+                $dbman->add_index($table, $index);
+            }
+        }
 
         // Changing precision of field name on table local_o365_groups_cache to (256).
-        $table = new xmldb_table('local_o365_groups_cache');
-        $field = new xmldb_field('name', XMLDB_TYPE_CHAR, '256', null, null, null, null, 'objectid');
-
-        // Launch change of precision for field name.
-        $dbman->change_field_precision($table, $field);
+        if (isset($groupscachecolumns['name']) && $groupscachecolumns['name']->max_length != 256) {
+            $field = new xmldb_field('name', XMLDB_TYPE_CHAR, '256', null, null, null, null, 'objectid');
+            // Launch change of precision for field name.
+            $dbman->change_field_precision($table, $field);
+        }
 
         // Changing precision of field objectid on table local_o365_teams_cache to (36).
         $table = new xmldb_table('local_o365_teams_cache');
-        $field = new xmldb_field('objectid', XMLDB_TYPE_CHAR, '36', null, XMLDB_NOTNULL, null, null, 'id');
+        if ($dbman->table_exists($table)) {
+            $teamscachecolumns = $DB->get_columns('local_o365_teams_cache');
+            if (isset($teamscachecolumns['objectid']) && $teamscachecolumns['objectid']->max_length != 36) {
+                // Drop the objectid index first if it exists, as precision change cannot be made to indexed fields.
+                $index = new xmldb_index('objectid', XMLDB_INDEX_NOTUNIQUE, ['objectid']);
+                if ($dbman->index_exists($table, $index)) {
+                    $dbman->drop_index($table, $index);
+                }
+                $field = new xmldb_field('objectid', XMLDB_TYPE_CHAR, '36', null, XMLDB_NOTNULL, null, null, 'id');
+                // Launch change of precision for field objectid.
+                $dbman->change_field_precision($table, $field);
+                // Recreate the objectid index after precision change.
+                if (!$dbman->index_exists($table, $index)) {
+                    $dbman->add_index($table, $index);
+                }
+            }
 
-        // Launch change of precision for field name.
-        $dbman->change_field_precision($table, $field);
-
-        // Changing precision of field name on table local_o365_teams_cache to (264).
-        $table = new xmldb_table('local_o365_teams_cache');
-        $field = new xmldb_field('name', XMLDB_TYPE_CHAR, '264', null, null, null, null, 'objectid');
-
-        // Launch change of precision for field objectid.
-        $dbman->change_field_precision($table, $field);
+            // Changing precision of field name on table local_o365_teams_cache to (264).
+            if (isset($teamscachecolumns['name']) && $teamscachecolumns['name']->max_length != 264) {
+                $field = new xmldb_field('name', XMLDB_TYPE_CHAR, '264', null, null, null, null, 'objectid');
+                // Launch change of precision for field name.
+                $dbman->change_field_precision($table, $field);
+            }
+        }
 
         // O365 savepoint reached.
         upgrade_plugin_savepoint(true, 2024042202, 'local', 'o365');
@@ -1321,11 +1422,13 @@ function xmldb_local_o365_upgrade($oldversion) {
     if ($oldversion < 2024100712) {
         // Add index to local_o365_teams_cache.objectid for better query performance.
         $table = new xmldb_table('local_o365_teams_cache');
-        $index = new xmldb_index('objectid', XMLDB_INDEX_NOTUNIQUE, ['objectid']);
+        if ($dbman->table_exists($table)) {
+            $index = new xmldb_index('objectid', XMLDB_INDEX_NOTUNIQUE, ['objectid']);
 
-        // Conditionally launch add index objectid.
-        if (!$dbman->index_exists($table, $index)) {
-            $dbman->add_index($table, $index);
+            // Conditionally launch add index objectid.
+            if (!$dbman->index_exists($table, $index)) {
+                $dbman->add_index($table, $index);
+            }
         }
 
         // Add indexes to local_o365_groups_cache for better query performance.
@@ -1335,6 +1438,12 @@ function xmldb_local_o365_upgrade($oldversion) {
         // Conditionally launch add index objectid.
         if (!$dbman->index_exists($table, $index)) {
             $dbman->add_index($table, $index);
+        }
+
+        // Ensure not_found_since field exists.
+        $field = new xmldb_field('not_found_since', XMLDB_TYPE_INTEGER, '10', null, XMLDB_NOTNULL, null, '0', 'description');
+        if (!$dbman->field_exists($table, $field)) {
+            $dbman->add_field($table, $field);
         }
 
         $index = new xmldb_index('not_found_since', XMLDB_INDEX_NOTUNIQUE, ['not_found_since']);
@@ -1355,6 +1464,299 @@ function xmldb_local_o365_upgrade($oldversion) {
 
         // O365 savepoint reached.
         upgrade_plugin_savepoint(true, 2024100712, 'local', 'o365');
+    }
+
+    if ($oldversion < 2024100725.01) {
+        // Merge local_o365_teams_cache into local_o365_groups_cache.
+        // This upgrade consolidates the two cache tables to eliminate duplication,
+        // since every Team is built on top of a Microsoft 365 Group with the same objectid.
+
+        // Step 1: Extend name field length in local_o365_groups_cache from 256 to 264.
+        $table = new xmldb_table('local_o365_groups_cache');
+        $field = new xmldb_field('name', XMLDB_TYPE_CHAR, '264', null, null, null, null, 'objectid');
+
+        // Change field precision for name.
+        $dbman->change_field_precision($table, $field);
+
+        // Step 2: Add new fields to local_o365_groups_cache.
+        // Add has_team field (indicates if this group has an associated team).
+        $field = new xmldb_field('has_team', XMLDB_TYPE_INTEGER, '1', null, XMLDB_NOTNULL, null, '0', 'description');
+        if (!$dbman->field_exists($table, $field)) {
+            $dbman->add_field($table, $field);
+        }
+
+        // Add url field (team URL, null for groups without teams).
+        $field = new xmldb_field('url', XMLDB_TYPE_TEXT, null, null, null, null, null, 'has_team');
+        if (!$dbman->field_exists($table, $field)) {
+            $dbman->add_field($table, $field);
+        }
+
+        // Add locked field (team lock status, null for groups without teams).
+        $field = new xmldb_field('locked', XMLDB_TYPE_INTEGER, '1', null, null, null, null, 'url');
+        if (!$dbman->field_exists($table, $field)) {
+            $dbman->add_field($table, $field);
+        }
+
+        // Step 3: Merge data from local_o365_teams_cache into local_o365_groups_cache.
+        if ($dbman->table_exists('local_o365_teams_cache')) {
+            // Process in chunks of 5000 to keep memory bounded while eliminating the N+1
+            // get_record() lookup per row. Each chunk bulk-preloads existing groups_cache
+            // rows in one query and batch-inserts new rows via insert_records().
+            $chunksize = 5000;
+            $teamrecordset = $DB->get_recordset('local_o365_teams_cache');
+            $chunk = [];
+
+            $mergeschunk = function (array $rows) use ($DB): void {
+                if (empty($rows)) {
+                    return;
+                }
+
+                // Bulk-preload all matching groups_cache rows for this chunk.
+                $objectids = array_map(fn($r) => $r->objectid, $rows);
+                $existinggroups = $DB->get_records_list('local_o365_groups_cache', 'objectid', $objectids);
+
+                // Re-key by objectid for O(1) lookup.
+                $existingbyoid = [];
+                foreach ($existinggroups as $eg) {
+                    $existingbyoid[$eg->objectid] = $eg;
+                }
+
+                $toinsert = [];
+                foreach ($rows as $team) {
+                    if (isset($existingbyoid[$team->objectid])) {
+                        // Update existing group record with team data.
+                        $eg = $existingbyoid[$team->objectid];
+                        $eg->has_team = 1;
+                        $eg->url = $team->url;
+                        $eg->locked = $team->locked;
+                        // Prefer teams_cache name/description if present.
+                        if (!empty($team->name)) {
+                            $eg->name = $team->name;
+                        }
+                        if (!empty($team->description)) {
+                            $eg->description = $team->description;
+                        }
+                        $DB->update_record('local_o365_groups_cache', $eg);
+                    } else {
+                        // No corresponding group record - queue for batch insert.
+                        $newgroup = new stdClass();
+                        $newgroup->objectid = $team->objectid;
+                        $newgroup->name = $team->name;
+                        $newgroup->description = $team->description;
+                        $newgroup->has_team = 1;
+                        $newgroup->url = $team->url;
+                        $newgroup->locked = $team->locked;
+                        $newgroup->not_found_since = 0;
+                        $toinsert[] = $newgroup;
+                    }
+                }
+
+                if (!empty($toinsert)) {
+                    $DB->insert_records('local_o365_groups_cache', $toinsert);
+                }
+            };
+
+            foreach ($teamrecordset as $team) {
+                $chunk[] = $team;
+                if (count($chunk) >= $chunksize) {
+                    $mergeschunk($chunk);
+                    $chunk = [];
+                }
+            }
+            $mergeschunk($chunk); // Process any remaining rows.
+
+            $teamrecordset->close();
+
+            // Step 4: Drop the local_o365_teams_cache table.
+            $table = new xmldb_table('local_o365_teams_cache');
+            $dbman->drop_table($table);
+        }
+
+        // Step 5: Add index on has_team field for better query performance.
+        $table = new xmldb_table('local_o365_groups_cache');
+        $index = new xmldb_index('has_team', XMLDB_INDEX_NOTUNIQUE, ['has_team']);
+
+        if (!$dbman->index_exists($table, $index)) {
+            $dbman->add_index($table, $index);
+        }
+
+        // Step 6: Initialize config setting for last cache update time.
+        set_config('groups_cache_last_update', 0, 'local_o365');
+
+        // O365 savepoint reached.
+        upgrade_plugin_savepoint(true, 2024100725.01, 'local', 'o365');
+    }
+
+    if ($oldversion < 2024100725.02) {
+        // Add team_details_last_attempted field to track failed team detail fetch attempts.
+        // This prevents repeated API calls for teams that don't have valid details,
+        // while still allowing retries after 24 hours.
+
+        $table = new xmldb_table('local_o365_groups_cache');
+        $field = new xmldb_field('team_details_last_attempted', XMLDB_TYPE_INTEGER, '10', null, XMLDB_NOTNULL, null, '0', 'locked');
+
+        // Conditionally add field team_details_last_attempted.
+        if (!$dbman->field_exists($table, $field)) {
+            $dbman->add_field($table, $field);
+        }
+
+        // O365 savepoint reached.
+        upgrade_plugin_savepoint(true, 2024100725.02, 'local', 'o365');
+    }
+
+    if ($oldversion < 2024100725.03) {
+        // Add composite indexes for better query performance.
+        $table = new xmldb_table('local_o365_groups_cache');
+
+        // Composite index for cleanup queries (not_found_since, objectid).
+        $index = new xmldb_index('idx_cleanup', XMLDB_INDEX_NOTUNIQUE, ['not_found_since', 'objectid']);
+        if (!$dbman->index_exists($table, $index)) {
+            $dbman->add_index($table, $index);
+        }
+
+        // Composite index for team detail fetch queries (has_team, team_details_last_attempted).
+        $index = new xmldb_index('idx_team_details', XMLDB_INDEX_NOTUNIQUE, ['has_team', 'team_details_last_attempted']);
+        if (!$dbman->index_exists($table, $index)) {
+            $dbman->add_index($table, $index);
+        }
+
+        // Add lock_status_last_checked field to track when lock status was last refreshed.
+        // This allows separate refresh intervals for URL (fetch once) vs lock status (refresh periodically).
+        $field = new xmldb_field(
+            'lock_status_last_checked',
+            XMLDB_TYPE_INTEGER,
+            '10',
+            null,
+            XMLDB_NOTNULL,
+            null,
+            '0',
+            'team_details_last_attempted'
+        );
+        if (!$dbman->field_exists($table, $field)) {
+            $dbman->add_field($table, $field);
+        }
+
+        // O365 savepoint reached.
+        upgrade_plugin_savepoint(true, 2024100725.03, 'local', 'o365');
+    }
+
+    if ($oldversion < 2024100735.01) {
+        // Add dedicated photohash field to local_o365_appassign.
+        // Previously the photoid column (originally the MS 365 photo etag ID) was repurposed
+        // to store a SHA-256 hash of the photo bytes, causing confusion with the field's stated
+        // purpose. This step introduces a separate, correctly-named column for the hash so that
+        // photoid retains its original meaning.
+        $table = new xmldb_table('local_o365_appassign');
+        $field = new xmldb_field(
+            'photohash',
+            XMLDB_TYPE_CHAR,
+            '64',
+            null,
+            null,
+            null,
+            null,
+            'photoid'
+        );
+        if (!$dbman->field_exists($table, $field)) {
+            $dbman->add_field($table, $field);
+        }
+
+        // Migrate any SHA-256 hashes already stored in photoid into the new photohash column.
+        // A SHA-256 hex string is exactly 64 characters; a genuine MS 365 photo etag ID is
+        // typically much shorter, so length == 64 is a reliable discriminator.
+        $DB->execute(
+            "UPDATE {local_o365_appassign}
+                SET photohash = photoid, photoid = ''
+              WHERE " . $DB->sql_length('photoid') . " = 64"
+        );
+
+        // O365 savepoint reached.
+        upgrade_plugin_savepoint(true, 2024100735.01, 'local', 'o365');
+    }
+
+    if ($oldversion < 2024100735.03) {
+        // Split the 'disabledsync' user sync option into 'disabledsyncsuspend' and 'disabledsyncreenable', so sites can
+        // suspend Moodle accounts when disabled in Microsoft Entra ID without also automatically re-enabling them when
+        // re-enabled in Microsoft Entra ID.
+        // Preserve existing behaviour: sites with 'disabledsync' enabled get both new options enabled.
+        $usersync = get_config('local_o365', 'usersync');
+        if (!empty($usersync)) {
+            $options = explode(',', $usersync);
+            if (in_array('disabledsync', $options)) {
+                $options = array_diff($options, ['disabledsync']);
+                $options[] = 'disabledsyncsuspend';
+                $options[] = 'disabledsyncreenable';
+                set_config('usersync', implode(',', array_unique($options)), 'local_o365');
+            }
+        }
+
+        // O365 savepoint reached.
+        upgrade_plugin_savepoint(true, 2024100735.03, 'local', 'o365');
+    }
+
+    if ($oldversion < 2024100735.04) {
+        // Queue adhoc task to force a one-off full user sync, repairing accounts whose linked
+        // Microsoft Entra ID object ID went stale (e.g. the Entra ID account was deleted and
+        // recreated) before the object ID repair logic in the user sync task was fixed. Delta
+        // sync only reports users that changed since the last sync, so already-stale accounts
+        // would not otherwise be picked up again on their own.
+        $task = new \local_o365\task\forcefullusersync();
+        // Set next run time to ensure it runs in the next cron cycle, not during upgrade.
+        $task->set_next_run_time(time() + 60);
+        \core\task\manager::queue_adhoc_task($task);
+
+        mtrace('Queued adhoc task to force a full user sync and repair stale Entra ID object IDs.');
+
+        // O365 savepoint reached.
+        upgrade_plugin_savepoint(true, 2024100735.04, 'local', 'o365');
+    }
+
+    if ($oldversion < 2024100740.02) {
+        // The "Microsoft 365 for China" setting has moved to auth_oidc as the "Microsoft cloud" setting.
+        $chineseapi = get_config('local_o365', 'chineseapi');
+        if ($chineseapi !== false) {
+            if (get_config('auth_oidc', 'microsoftcloud') === false) {
+                set_config(
+                    'microsoftcloud',
+                    !empty($chineseapi) ? AUTH_OIDC_MICROSOFT_CLOUD_CHINA : AUTH_OIDC_MICROSOFT_CLOUD_GLOBAL,
+                    'auth_oidc'
+                );
+            }
+
+            unset_config('chineseapi', 'local_o365');
+        }
+
+        // O365 savepoint reached.
+        upgrade_plugin_savepoint(true, 2024100740.02, 'local', 'o365');
+    }
+
+    if ($oldversion < 2024100740.06) {
+        // The minute of the user suspension/deletion running time was previously saved by the settings page under
+        // the wrong config name (with a "local_o365/" prefix), so the user sync task never read it.
+        // Move the value to the correct config name.
+        $wrongname = 'local_o365/usersync_suspension_m';
+        $wrongvalue = get_config('local_o365', $wrongname);
+        if ($wrongvalue !== false) {
+            set_config('usersync_suspension_m', (int) $wrongvalue, 'local_o365');
+            unset_config($wrongname, 'local_o365');
+        }
+
+        // O365 savepoint reached.
+        upgrade_plugin_savepoint(true, 2024100740.06, 'local', 'o365');
+    }
+
+    if ($oldversion < 2024100740.07) {
+        // Remove manual user matches saved with a blank Microsoft 365 username. They can never match a Microsoft 365 user
+        // and only block the Moodle user from being matched properly. The manual match form now rejects blank usernames.
+        $select = $DB->sql_isempty('local_o365_connections', 'entraidupn', false, false);
+        $deleted = $DB->count_records_select('local_o365_connections', $select);
+        if ($deleted) {
+            $DB->delete_records_select('local_o365_connections', $select);
+            mtrace('Removed ' . $deleted . ' user match record(s) with a blank Microsoft 365 username.');
+        }
+
+        // O365 savepoint reached.
+        upgrade_plugin_savepoint(true, 2024100740.07, 'local', 'o365');
     }
 
     return true;

@@ -1,4 +1,4 @@
-name: Moodle Plugin CI for auth_oidc
+name: Moodle Plugin CI for local_o365
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -9,6 +9,9 @@ on:
     branches:
       - 'MOODLE_*_STABLE'
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   check:
@@ -25,14 +28,9 @@ jobs:
         options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 3
 
       mariadb:
-        image: mariadb:10
+        image: mariadb:10.11
         env:
-          MYSQL_USER: 'root'
           MYSQL_ALLOW_EMPTY_PASSWORD: "true"
-          MYSQL_CHARACTER_SET_SERVER: "utf8mb4"
-          MYSQL_COLLATION_SERVER: "utf8mb4_unicode_ci"
-          MYSQL_INNODB_FILE_PER_TABLE: "1"
-          MYSQL_INNODB_FILE_FORMAT: "Barracuda"
         ports:
           - 3306:3306
         options: --health-cmd="mysqladmin ping" --health-interval 10s --health-timeout 5s --health-retries 3
@@ -40,18 +38,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        moodle-branch: ['MOODLE_405_STABLE']
-        php: [8.1, 8.2, 8.3]
-        database: [pgsql, mariadb]
+        moodle-branch: [ 'MOODLE_405_STABLE' ]
+        php: [ 8.1, 8.2, 8.3 ]
+        database: [ pgsql, mariadb ]
 
     steps:
       - name: Check out repository code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           path: plugin
 
       - name: Setup PHP ${{ matrix.php }}
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
           php-version: ${{ matrix.php }}
           ini-values: max_input_vars=5000

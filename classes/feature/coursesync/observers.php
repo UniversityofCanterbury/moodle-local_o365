@@ -72,12 +72,15 @@ class observers {
         if (empty($apiclient)) {
             return false;
         }
+
         $coursesyncmain = new main($apiclient, false);
 
         $connectedtoteam = false;
         if (utils::is_course_sync_enabled($courseid)) {
-            if (!$o365object =
-                $DB->get_record('local_o365_objects', ['type' => 'group', 'subtype' => 'course', 'moodleid' => $courseid])) {
+            if (
+                !$o365object =
+                $DB->get_record('local_o365_objects', ['type' => 'group', 'subtype' => 'course', 'moodleid' => $courseid])
+            ) {
                 return false;
             } else {
                 // Check if team exists.
@@ -129,6 +132,7 @@ class observers {
                                 }
                                 break;
                         }
+
                         switch ($courseresetsetting) {
                             case COURSE_SYNC_RESET_COURSE_SETTING_DISCONNECT_AND_CREATE_NEW:
                                 $coursesyncmain->process_course_reset($course, $o365object, $connectedtoteam);
@@ -140,7 +144,6 @@ class observers {
                         }
                     }
                 }
-
                 break;
             case COURSE_SYNC_RESET_SITE_SETTING_DISCONNECT_AND_CREATE_NEW:
                 $coursesyncmain->process_course_reset($course, $o365object, $connectedtoteam);
@@ -152,6 +155,50 @@ class observers {
 
                 break;
         }
+
+        return true;
+    }
+
+    /**
+     * Observer function that listens for group_created event, to create the channel of the group.
+     *
+     * @param \core\event\group_created $event
+     * @return bool
+     */
+    public static function handle_group_created(\core\event\group_created $event): bool {
+        return groupchannels::queue_group_sync((int)$event->objectid);
+    }
+
+    /**
+     * Observer function that listens for group_member_added event, to add the user to the channel of the group.
+     *
+     * @param \core\event\group_member_added $event
+     * @return bool
+     */
+    public static function handle_group_member_added(\core\event\group_member_added $event): bool {
+        return groupchannels::queue_group_sync((int)$event->objectid);
+    }
+
+    /**
+     * Observer function that listens for group_member_removed event, to remove the user from the channel of the group.
+     *
+     * @param \core\event\group_member_removed $event
+     * @return bool
+     */
+    public static function handle_group_member_removed(\core\event\group_member_removed $event): bool {
+        return groupchannels::queue_group_sync((int)$event->objectid);
+    }
+
+    /**
+     * Observer function that listens for group_deleted event, to forget the channel of the group.
+     *
+     * The channel itself is left in Microsoft Teams, as it may hold conversations and files worth keeping.
+     *
+     * @param \core\event\group_deleted $event
+     * @return bool
+     */
+    public static function handle_group_deleted(\core\event\group_deleted $event): bool {
+        groupchannels::forget_group((int)$event->objectid);
 
         return true;
     }

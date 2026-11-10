@@ -30,7 +30,7 @@ defined('MOODLE_INTERNAL') || die();
 require_once($CFG->libdir . '/adminlib.php');
 require_once($CFG->dirroot . '/cohort/lib.php');
 
-use context_system;
+use core\context\system;
 use local_o365\httpclient;
 use local_o365\oauth2\clientdata;
 use local_o365\rest\unified;
@@ -149,6 +149,7 @@ class main {
         foreach ($mappingrecordset as $mapping) {
             $mappings[$mapping->id] = $mapping;
         }
+
         $mappingrecordset->close();
 
         return $mappings;
@@ -208,7 +209,7 @@ class main {
      * Fetch cohorts from the local Moodle cache.
      */
     public function fetch_cohorts(): void {
-        $systemcontext = context_system::instance();
+        $systemcontext = system::instance();
         $systemcohorts = cohort_get_cohorts($systemcontext->id, 0, 0);
         $this->cohortlist = $systemcohorts['cohorts'];
     }
@@ -216,22 +217,27 @@ class main {
     /**
      * Update Groups cache.
      *
-     * @return bool
+     * @return bool|null True if the cache was updated, null if skipped (rate limit), false on error.
      */
-    public function update_groups_cache(): bool {
+    public function update_groups_cache(): ?bool {
         global $DB;
 
         try {
-            if (utils::update_groups_cache($this->graphclient, 1)) {
+            $result = utils::update_groups_cache($this->graphclient, 1);
+            if ($result === true) {
                 $sql = 'SELECT *
                           FROM {local_o365_groups_cache}
                          WHERE not_found_since = 0';
-                $this->grouplist = $DB->get_records_sql($sql);
-
-                return true;
-            } else {
-                return false;
+                $records = $DB->get_records_sql($sql);
+                $this->grouplist = [];
+                foreach ($records as $record) {
+                    $this->grouplist[] = [
+                        'id' => $record->objectid,
+                        'displayName' => $record->name,
+                    ];
+                }
             }
+            return $result;
         } catch (moodle_exception $e) {
             utils::debug('Exception in update_groups_cache: ' . $e->getMessage(), __METHOD__, $e);
             return false;
@@ -239,61 +245,65 @@ class main {
     }
 
     /**
+     * Fetch owners and transitive members for multiple Microsoft groups using batched Graph API calls.
+     *
+     * @param array $groupoids Array of Microsoft group object IDs.
+     * @return array Associative array keyed by group object ID; see
+     *         unified::get_groups_owners_and_members_batch() for the value structure.
+     */
+    public function get_owners_and_members_for_groups(array $groupoids): array {
+        return $this->graphclient->get_groups_owners_and_members_batch($groupoids);
+    }
+
+    /**
      * Synchronize the members of a Moodle cohort based on a Microsoft group.
      *
      * @param string $groupoid
      * @param int $cohortid
+     * @param array|null $groupdata One entry from get_owners_and_members_for_groups(), or null if missing.
      * @return void
      */
-    public function sync_members_by_group_oid_and_cohort_id(string $groupoid, int $cohortid): void {
-        $groupownersandmembers = $this->get_group_owners_and_members($groupoid);
-
-        if ($groupownersandmembers !== false) {
-            $this->sync_cohort_members_by_cohort_id_and_microsoft_user_objects($cohortid, $groupownersandmembers);
-        }
-    }
-
-    /**
-     * Fetches members and owners of a specific Microsoft group.
-     *
-     * @param string $groupoid
-     * @return array|false
-     */
-    public function get_group_owners_and_members(string $groupoid) {
+    public function sync_members_by_group_oid_and_cohort_id(string $groupoid, int $cohortid, ?array $groupdata): void {
         global $DB;
 
-        $groupmembers = [];
+        if ($groupdata === null) {
+            mtrace("...... No group data available for group ID $groupoid. Skipping.");
 
-        if (empty($this->graphclient)) {
-            return false;
+            return;
         }
 
-        try {
-            $memberrecords = $this->graphclient->get_group_members($groupoid);
-            $ownerrecords = $this->graphclient->get_group_owners($groupoid);
-        } catch (moodle_exception $e) {
-            if (strpos($e->getMessage(), utils::RESOURCE_NOT_EXIST_ERROR) !== false) {
+        if ($groupdata['members'] === null || $groupdata['owners'] === null) {
+            $error = $groupdata['error'] ?? 'Unknown error.';
+
+            if (strpos($error, utils::RESOURCE_NOT_EXIST_ERROR) !== false) {
                 $DB->delete_records('local_o365_objects', ['objectid' => $groupoid]);
                 mtrace("...... Deleted mapping for non-existing group ID $groupoid.");
             } else {
-                mtrace("...... Error fetching group members for group ID $groupoid: " . $e->getMessage());
+                mtrace("...... Error fetching group members for group ID $groupoid: " . $error);
             }
 
-            return false;
+            return;
         }
 
-        foreach ($memberrecords as $memberrecord) {
-            if (!array_key_exists($memberrecord['id'], $groupmembers)) {
-                $groupmembers[$memberrecord['id']] = $memberrecord;
-            }
-        }
-        foreach ($ownerrecords as $ownerrecord) {
-            if (!array_key_exists($ownerrecord['id'], $groupmembers)) {
-                $groupmembers[$ownerrecord['id']] = $ownerrecord;
+        $excludeowners = (bool) get_config('local_o365', 'cohortsync_excludeowners');
+
+        $groupownersandmembers = [];
+        foreach ($groupdata['members'] as $record) {
+            if (!array_key_exists($record['id'], $groupownersandmembers)) {
+                $groupownersandmembers[$record['id']] = $record;
             }
         }
 
-        return $groupmembers;
+        foreach ($groupdata['owners'] as $ownerrecord) {
+            if ($excludeowners) {
+                // Owners can also be returned as group members - remove them from the sync set.
+                unset($groupownersandmembers[$ownerrecord['id']]);
+            } else if (!array_key_exists($ownerrecord['id'], $groupownersandmembers)) {
+                $groupownersandmembers[$ownerrecord['id']] = $ownerrecord;
+            }
+        }
+
+        $this->sync_cohort_members_by_cohort_id_and_microsoft_user_objects($cohortid, $groupownersandmembers);
     }
 
     /**
@@ -303,8 +313,10 @@ class main {
      * @param array $microsoftuserobjects
      * @return void
      */
-    private function sync_cohort_members_by_cohort_id_and_microsoft_user_objects(int $cohortid,
-        array $microsoftuserobjects): void {
+    private function sync_cohort_members_by_cohort_id_and_microsoft_user_objects(
+        int $cohortid,
+        array $microsoftuserobjects
+    ): void {
         global $DB;
 
         $microsoftuseroids = array_column($microsoftuserobjects, 'id');
@@ -314,6 +326,7 @@ class main {
         foreach ($currentmembersrecordset as $member) {
             $currentmembers[$member->userid] = $member;
         }
+
         $currentmembersrecordset->close();
         $connectedusers = $this->get_all_potential_user_details($microsoftuseroids, array_keys($currentmembers));
 
@@ -351,8 +364,11 @@ class main {
         }
 
         if (!empty($microsoftuseroids)) {
-            [$microsoftuseroidsql, $microsoftuseroidparams] = $DB->get_in_or_equal($microsoftuseroids, SQL_PARAMS_NAMED,
-                'microsoftuseroid');
+            [$microsoftuseroidsql, $microsoftuseroidparams] = $DB->get_in_or_equal(
+                $microsoftuseroids,
+                SQL_PARAMS_NAMED,
+                'microsoftuseroid'
+            );
         }
 
         if (!empty($moodleuserids)) {
@@ -412,6 +428,7 @@ class main {
         if (is_null($this->cohortlist)) {
             $this->fetch_cohorts();
         }
+
         if (array_key_exists($cohortid, $this->cohortlist)) {
             $cohortname = $this->cohortlist[$cohortid]->name;
         }
@@ -425,7 +442,7 @@ class main {
      * @param string $caller The calling function, used for logging.
      * @return unified|bool A Microsoft Graph API instance.
      */
-    public static function get_unified_api(string $caller = 'local_o365/feature/courserequest/get_unified_api') {
+    public static function get_unified_api(string $caller = 'local_o365/feature/cohortsync/get_unified_api') {
         $clientdata = clientdata::instance_from_oidc();
         $httpclient = new httpclient();
         $tokenresource = unified::get_tokenresource();

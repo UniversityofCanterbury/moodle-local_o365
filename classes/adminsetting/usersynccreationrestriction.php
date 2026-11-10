@@ -26,12 +26,14 @@
 namespace local_o365\adminsetting;
 
 use admin_setting;
+use local_o365\feature\usersync\main as usersync;
+use moodle_exception;
 
 defined('MOODLE_INTERNAL') || die();
 
 global $CFG;
 
-require_once($CFG->dirroot.'/lib/adminlib.php');
+require_once($CFG->dirroot . '/lib/adminlib.php');
 
 /**
  * Admin setting to control field mappings for users.
@@ -77,8 +79,11 @@ class usersynccreationrestriction extends admin_setting {
         ];
         $order = 0;
         while ($order++ < 15) {
-            $this->remotefields['extensionAttribute' . $order] = get_string('settings_fieldmap_field_extensionattribute',
-                'auth_oidc', $order);
+            $this->remotefields['extensionAttribute' . $order] = get_string(
+                'settings_fieldmap_field_extensionattribute',
+                'auth_oidc',
+                $order
+            );
         }
 
         return parent::__construct($name, $visiblename, $description, $defaultsetting);
@@ -94,7 +99,21 @@ class usersynccreationrestriction extends admin_setting {
         if (is_null($setting)) {
             $setting = '';
         }
+
         return unserialize($setting);
+    }
+
+    /**
+     * Construct the Microsoft Graph API client used to validate group object IDs.
+     *
+     * Extracted into its own method so tests can override it to inject a stub API client.
+     *
+     * @return object An API client exposing get_groups_batch().
+     * @throws moodle_exception
+     */
+    protected function get_group_api_client() {
+        $usersync = new usersync();
+        return $usersync->construct_user_api();
     }
 
     /**
@@ -111,6 +130,41 @@ class usersynccreationrestriction extends admin_setting {
             // Broken data, wipe setting.
             $this->config_write($this->name, serialize($newconfig));
             return '';
+        }
+
+        if ($data['remotefield'] === 'o365groupid' && trim($data['value']) !== '') {
+            $rawgroupids = array_filter(array_map('trim', explode(',', $data['value'])));
+            if (empty($rawgroupids)) {
+                return get_string('settings_usersynccreationrestriction_invalidgroupid', 'local_o365', $data['value']);
+            }
+
+            // Object IDs are case-insensitive GUIDs, so deduplicate case-insensitively. The
+            // casing of the first occurrence of each ID is kept for a readable stored value.
+            $groupids = [];
+            foreach ($rawgroupids as $groupid) {
+                $lowergroupid = strtolower($groupid);
+                if (!isset($groupids[$lowergroupid])) {
+                    $groupids[$lowergroupid] = $groupid;
+                }
+            }
+            $groupids = array_values($groupids);
+
+            try {
+                $apiclient = $this->get_group_api_client();
+
+                // Validate all group IDs in a single batched call rather than one request per ID.
+                $foundgroups = $apiclient->get_groups_batch($groupids);
+                foreach ($groupids as $groupid) {
+                    if (empty($foundgroups[$groupid]['id'])) {
+                        return get_string('settings_usersynccreationrestriction_invalidgroupid', 'local_o365', $groupid);
+                    }
+                }
+            } catch (moodle_exception $e) {
+                return get_string('settings_usersynccreationrestriction_groupvalidationerror', 'local_o365');
+            }
+
+            // Store a predictable comma-separated value after trimming and removing duplicates.
+            $data['value'] = implode(', ', $groupids);
         }
 
         $newconfig = [
@@ -135,6 +189,7 @@ class usersynccreationrestriction extends admin_setting {
         if (empty($data) || !is_array($data)) {
             $data = [];
         }
+
         $remotefield = (isset($data['remotefield']) && isset($this->remotefields[$data['remotefield']])) ?
             $data['remotefield'] : '';
         $value = (isset($data['value'])) ? $data['value'] : '';
@@ -147,14 +202,19 @@ class usersynccreationrestriction extends admin_setting {
             'style' => 'width: 350px;vertical-align: top;margin-right: 0.25rem;margin-top:0.25rem;',
             'onchange' => $onchange,
         ];
-        $html .= \html_writer::select($this->remotefields,
-            $this->get_full_name().'[remotefield]', $remotefield, ['' => 'choosedots'], $selectattrs);
+        $html .= \html_writer::select(
+            $this->remotefields,
+            $this->get_full_name() . '[remotefield]',
+            $remotefield,
+            ['' => 'choosedots'],
+            $selectattrs
+        );
 
         $inputdivattrs = ['style' => 'display:inline-block;margin-top:0.25rem;'];
         $html .= \html_writer::start_tag('div', $inputdivattrs);
         $inputattrs = [
             'type' => 'text',
-            'name' => $this->get_full_name().'[value]',
+            'name' => $this->get_full_name() . '[value]',
             'placeholder' => get_string('settings_usersynccreationrestriction_fieldval', 'local_o365'),
             'class' => 'form-control',
             'style' => 'width: 250px;display:inline-block;',
@@ -170,12 +230,13 @@ class usersynccreationrestriction extends admin_setting {
         $inputattrs = [
             'type' => 'checkbox',
             'id' => 'usercreationrestriction_useregex',
-            'name' => $this->get_full_name().'[useregex]',
+            'name' => $this->get_full_name() . '[useregex]',
             'value' => '1',
         ];
         if ($useregex === true) {
             $inputattrs['checked'] = 'checked';
         }
+
         $html .= \html_writer::empty_tag('input', $inputattrs);
         $html .= ' ';
         $regexstr = get_string('settings_usersynccreationrestriction_regex', 'local_o365');

@@ -26,31 +26,29 @@
 namespace local_o365\privacy;
 
 use context;
+use core\context\user;
 use core_privacy\local\metadata\collection;
+use core_privacy\local\metadata\provider as metadata_provider;
 use core_privacy\local\request\approved_userlist;
 use core_privacy\local\request\contextlist;
 use core_privacy\local\request\approved_contextlist;
 use core_privacy\local\request\core_userlist_provider;
+use core_privacy\local\request\plugin\provider as plugin_provider;
+use core_privacy\local\request\user_preference_provider;
+use core_privacy\local\request\transform;
 use core_privacy\local\request\userlist;
 use core_privacy\local\request\writer;
+use local_o365\feature\usersync\main;
 use stdClass;
-
-defined('MOODLE_INTERNAL') || die();
-
-/**
- * Local userlist provider for local_o365.
- */
-interface local_o365_userlist extends core_userlist_provider {
-};
 
 /**
  * Privacy subsystem implementation for local_o365.
  */
 class provider implements
-    \core_privacy\local\request\plugin\provider,
-    \core_privacy\local\metadata\provider,
-    local_o365_userlist {
-
+    core_userlist_provider,
+    metadata_provider,
+    plugin_provider,
+    user_preference_provider {
     /**
      * Returns metadata about this system.
      *
@@ -103,6 +101,7 @@ class provider implements
                 'muserid',
                 'assigned',
                 'photoid',
+                'photohash',
                 'photoupdated',
             ],
             'local_o365_matchqueue' => [
@@ -122,16 +121,55 @@ class provider implements
         foreach ($tables as $table => $fields) {
             $fielddata = [];
             foreach ($fields as $field) {
-                $fielddata[$field] = 'privacy:metadata:'.$table.':'.$field;
+                $fielddata[$field] = 'privacy:metadata:' . $table . ':' . $field;
             }
+
             $collection->add_database_table(
                 $table,
                 $fielddata,
-                'privacy:metadata:'.$table
+                'privacy:metadata:' . $table
             );
         }
 
+        $collection->add_user_preference(
+            main::SUSPENDED_TIME_PREFERENCE,
+            'privacy:metadata:preference:suspendedtime'
+        );
+
+        $collection->add_user_preference(
+            \local_o365\feature\calsync\autosubscribe::PREF_INITIALISED,
+            'privacy:metadata:preference:calsync_initialised'
+        );
+
         return $collection;
+    }
+
+    /**
+     * Export all user preferences for the plugin.
+     *
+     * @param int $userid The ID of the user whose preferences are being exported.
+     */
+    public static function export_user_preferences(int $userid): void {
+        $suspendedtime = get_user_preferences(main::SUSPENDED_TIME_PREFERENCE, null, $userid);
+        if ($suspendedtime !== null) {
+            writer::export_user_preference(
+                'local_o365',
+                main::SUSPENDED_TIME_PREFERENCE,
+                transform::datetime((int) $suspendedtime),
+                get_string('privacy:metadata:preference:suspendedtime', 'local_o365')
+            );
+        }
+
+        $calsyncpref = \local_o365\feature\calsync\autosubscribe::PREF_INITIALISED;
+        $calsyncinitialised = get_user_preferences($calsyncpref, null, $userid);
+        if ($calsyncinitialised !== null) {
+            writer::export_user_preference(
+                'local_o365',
+                $calsyncpref,
+                transform::yesno($calsyncinitialised),
+                get_string('privacy:metadata:preference:calsync_initialised', 'local_o365')
+            );
+        }
     }
 
     /**
@@ -145,6 +183,7 @@ class provider implements
         if (self::user_has_o365_data($userid)) {
             $contextlist->add_user_context($userid);
         }
+
         return $contextlist;
     }
 
@@ -155,7 +194,7 @@ class provider implements
      */
     public static function get_users_in_context(userlist $userlist) {
         $context = $userlist->get_context();
-        if (!$context instanceof \context_user) {
+        if (!$context instanceof user) {
             return;
         }
 
@@ -173,14 +212,14 @@ class provider implements
     public static function export_user_data(approved_contextlist $contextlist) {
         global $DB;
         $user = $contextlist->get_user();
-        $context = \context_user::instance($contextlist->get_user()->id);
+        $context = user::instance($contextlist->get_user()->id);
         $tables = static::get_table_user_map($user);
         foreach ($tables as $table => $filterparams) {
             $records = $DB->get_recordset($table, $filterparams);
             foreach ($records as $record) {
                 writer::with_context($context)->export_data([
                     get_string('privacy:metadata:local_o365', 'local_o365'),
-                    get_string('privacy:metadata:'.$table, 'local_o365'),
+                    get_string('privacy:metadata:' . $table, 'local_o365'),
                 ], $record);
             }
         }
@@ -206,6 +245,7 @@ class provider implements
         if (empty($contextlist->count())) {
             return;
         }
+
         foreach ($contextlist->get_contexts() as $context) {
             if ($context->contextlevel == CONTEXT_USER) {
                 self::delete_user_data($context->instanceid);
@@ -220,13 +260,13 @@ class provider implements
      */
     public static function delete_data_for_users(approved_userlist $userlist) {
         $context = $userlist->get_context();
-        if ($context instanceof \context_user) {
+        if ($context instanceof user) {
             self::delete_user_data($context->instanceid);
         }
     }
 
     /**
-     * Return true if the specified userid has data in any local_o365 tables.
+     * Return true if the specified userid has data in any local_o365 tables or the suspended time user preference.
      *
      * @param int $userid The user to check for.
      * @return boolean
@@ -234,12 +274,13 @@ class provider implements
     private static function user_has_o365_data(int $userid) {
         global $DB;
 
-        $userdata = new stdClass;
+        $userdata = new stdClass();
         $userdata->id = $userid;
         $user = $DB->get_record('user', ['id' => $userid]);
         if (!empty($user)) {
             $userdata->username = $user->username;
         }
+
         $tables = self::get_table_user_map($userdata);
         foreach ($tables as $table => $filterparams) {
             if ($DB->count_records($table, $filterparams) > 0) {
@@ -247,7 +288,7 @@ class provider implements
             }
         }
 
-        return false;
+        return $DB->record_exists('user_preferences', ['userid' => $userid, 'name' => main::SUSPENDED_TIME_PREFERENCE]);
     }
 
     /**
@@ -258,16 +299,19 @@ class provider implements
     private static function delete_user_data(int $userid) {
         global $DB;
 
-        $userdata = new stdClass;
+        $userdata = new stdClass();
         $userdata->id = $userid;
         $user = $DB->get_record('user', ['id' => $userid]);
         if (!empty($user)) {
             $userdata->username = $user->username;
         }
+
         $tables = self::get_table_user_map($userdata);
         foreach ($tables as $table => $filterparams) {
             $DB->delete_records($table, $filterparams);
         }
+
+        $DB->delete_records('user_preferences', ['userid' => $userid, 'name' => main::SUSPENDED_TIME_PREFERENCE]);
     }
 
     /**
@@ -289,6 +333,7 @@ class provider implements
         if (isset($user->username)) {
             $tables['local_o365_matchqueue'] = ['musername' => $user->username];
         }
+
         return $tables;
     }
 }

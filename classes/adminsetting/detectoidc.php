@@ -26,6 +26,7 @@
 namespace local_o365\adminsetting;
 
 use admin_setting;
+use core\url;
 
 defined('MOODLE_INTERNAL') || die();
 
@@ -38,7 +39,6 @@ require_once($CFG->dirroot . '/auth/oidc/lib.php');
  * Admin setting to detect whether oauth credentials are present in openid connect.
  */
 class detectoidc extends admin_setting {
-
     /**
      * Constructor.
      *
@@ -95,22 +95,23 @@ class detectoidc extends admin_setting {
      * @param string $query
      * @return string
      */
-    public function output_html($data, $query='') {
+    public function output_html($data, $query = '') {
         global $OUTPUT;
-        $settingspage = new \moodle_url('/admin/settings.php?section=authsettingoidc');
+        $settingspage = new url('/admin/settings.php?section=authsettingoidc');
         if (static::setup_step_complete() === true) {
             $icon = $OUTPUT->pix_icon('t/check', 'success', 'moodle');
             $message = \html_writer::tag('span', get_string('settings_detectoidc_credsvalid', 'local_o365'));
             $linkstr = get_string('settings_detectoidc_credsvalid_link', 'local_o365');
             $link = \html_writer::link($settingspage, $linkstr, ['style' => 'margin-left: 1rem']);
-            $html = \html_writer::tag('div', $icon.$message.$link, ['class' => 'alert-success alert local_o365_statusmessage']);
+            $html = \html_writer::tag('div', $icon . $message . $link, ['class' => 'alert-success alert local_o365_statusmessage']);
         } else {
             $icon = $OUTPUT->pix_icon('t/delete', 'success', 'moodle');
             $message = \html_writer::tag('span', get_string('settings_detectoidc_credsinvalid', 'local_o365'));
             $linkstr = get_string('settings_detectoidc_credsinvalid_link', 'local_o365');
             $link = \html_writer::link($settingspage, $linkstr, ['style' => 'margin-left: 1rem']);
-            $html = \html_writer::tag('div', $icon.$message.$link, ['class' => 'alert-error alert local_o365_statusmessage']);
+            $html = \html_writer::tag('div', $icon . $message . $link, ['class' => 'alert-error alert local_o365_statusmessage']);
         }
+
         return format_admin_setting($this, $this->visiblename, $html, $this->description, true, '', null, $query);
     }
 }

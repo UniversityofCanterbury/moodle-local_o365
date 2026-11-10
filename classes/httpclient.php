@@ -41,6 +41,25 @@ require_once($CFG->dirroot . '/lib/filelib.php');
  */
 class httpclient extends curl implements httpclientinterface {
     /**
+     * Constructor.
+     *
+     * Sets an overall request timeout so calls to Microsoft endpoints (including scheduled tasks, which
+     * are not bound by a PHP execution time limit) cannot hang indefinitely when the remote endpoint is
+     * unreachable or stops responding mid-request. Connect timeout is already 30s in the parent curl
+     * class, so only the missing overall timeout needs to be set here.
+     *
+     * @param array $settings Accepts the same keys as the parent curl class, plus an optional 'timeout'
+     *                         (seconds) to override the default overall request timeout.
+     */
+    public function __construct($settings = []) {
+        parent::__construct($settings);
+
+        $this->setopt([
+            'CURLOPT_TIMEOUT' => $settings['timeout'] ?? 300,
+        ]);
+    }
+
+    /**
      * Generate client tag headers.
      *
      * @return string[]
@@ -72,7 +91,7 @@ class httpclient extends curl implements httpclientinterface {
     protected function get_plugin_version(): string {
         global $CFG;
 
-        $plugin = new stdClass;
+        $plugin = new stdClass();
         require_once($CFG->dirroot . '/local/o365/version.php');
 
         return $plugin->release;
@@ -109,6 +128,7 @@ class httpclient extends curl implements httpclientinterface {
                     $this->_tmp_file_post_params[$key] = $value;
                 }
             }
+
             $options['CURLOPT_POSTFIELDS'] = $this->_tmp_file_post_params;
             unset($this->_tmp_file_post_params);
         } else {
@@ -139,6 +159,7 @@ class httpclient extends curl implements httpclientinterface {
                     $this->_tmp_file_post_params[$key] = $value;
                 }
             }
+
             $options['CURLOPT_POSTFIELDS'] = $this->_tmp_file_post_params;
             unset($this->_tmp_file_post_params);
         } else {
@@ -155,12 +176,14 @@ class httpclient extends curl implements httpclientinterface {
      * @param string $url
      * @param array $params
      * @param array $options
+     * @param bool $includeuserpwd
      * @return bool|string
      */
-    public function put($url, $params = [], $options = []): bool|string {
+    public function put($url, $params = [], $options = [], $includeuserpwd = true): bool|string {
         if (!isset($params['file'])) {
             throw new moodle_exception('errorhttpclientnofileinput', 'local_o365');
         }
+
         if (is_file($params['file'])) {
             $fp = fopen($params['file'], 'r');
             $size = filesize($params['file']);
@@ -170,9 +193,11 @@ class httpclient extends curl implements httpclientinterface {
             if (!$fp) {
                 throw new moodle_exception('errorhttpclientbadtempfileloc', 'local_o365');
             }
+
             fwrite($fp, $params['file']);
             fseek($fp, 0);
         }
+
         $options['CURLOPT_PUT'] = 1;
         $options['CURLOPT_INFILESIZE'] = $size;
         $options['CURLOPT_INFILE'] = $fp;

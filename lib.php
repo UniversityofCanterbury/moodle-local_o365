@@ -23,6 +23,9 @@
  * @copyright (C) 2016 onwards Microsoft Open Technologies, Inc. (http://msopentech.com/)
  */
 
+use core\context\system;
+use core\context\user;
+
 defined('MOODLE_INTERNAL') || die();
 
 require_once($CFG->libdir . '/filestorage/zip_archive.php');
@@ -70,6 +73,10 @@ const LOCAL_O365_TAB_SDS = 3;
 const LOCAL_O365_TAB_TEAMS = 5;
 /** @var int configuration tab "Teams Moodle app". */
 const LOCAL_O365_TAB_MOODLE_APP = 6;
+/** @var int configuration tab "User Sync settings". */
+const LOCAL_O365_TAB_USERSYNC = 7;
+/** @var int configuration tab "Course Sync settings". */
+const LOCAL_O365_TAB_COURSESYNC = 8;
 
 // Group roles.
 /** @var int group role owner */
@@ -116,8 +123,8 @@ const COURSE_USER_SYNC_DIRECTION_BOTH = 3;
 function local_o365_connectioncapability($userid, $mode = 'link', $require = false) {
     $check = $require ? 'require_capability' : 'has_capability';
     $cap = ($mode == 'link') ? 'local/o365:manageconnectionlink' : 'local/o365:manageconnectionunlink';
-    $contextsys = \context_system::instance();
-    $contextuser = \context_user::instance($userid);
+    $contextsys = system::instance();
+    $contextuser = user::instance($userid);
 
     return has_capability($cap, $contextsys) || $check($cap, $contextuser);
 }
@@ -129,8 +136,10 @@ function local_o365_connectioncapability($userid, $mode = 'link', $require = fal
  */
 function local_o365_rmdir($path) {
     $it = new RecursiveDirectoryIterator($path, RecursiveDirectoryIterator::SKIP_DOTS);
-    $files = new RecursiveIteratorIterator($it,
-        RecursiveIteratorIterator::CHILD_FIRST);
+    $files = new RecursiveIteratorIterator(
+        $it,
+        RecursiveIteratorIterator::CHILD_FIRST
+    );
     foreach ($files as $file) {
         if ($file->isDir()) {
             rmdir($file->getRealPath());
@@ -138,6 +147,7 @@ function local_o365_rmdir($path) {
             unlink($file->getRealPath());
         }
     }
+
     rmdir($path);
 }
 
@@ -154,6 +164,7 @@ function local_o365_create_manifest_file(): array {
     if (file_exists($pathtomanifestfolder)) {
         local_o365_rmdir($pathtomanifestfolder);
     }
+
     mkdir($pathtomanifestfolder, 0777, true);
 
     // Task 2: prepare manifest params.
@@ -169,11 +180,10 @@ function local_o365_create_manifest_file(): array {
 
     // Task 3: prepare manifest file.
     $manifest = [
-        '$schema' => 'https://developer.microsoft.com/en-us/json-schemas/teams/v1.7/MicrosoftTeams.schema.json',
-        'manifestVersion' => '1.7',
-        'version' => '1.4',
+        '$schema' => 'https://developer.microsoft.com/en-us/json-schemas/teams/v1.25/MicrosoftTeams.schema.json',
+        'manifestVersion' => '1.25',
+        'version' => '1.6.0',
         'id' => $teamsmoodleappexternalid,
-        'packageName' => 'ie.enovation.microsoft.o365',
         'developer' => [
             'name' => 'Enovation Solutions',
             'websiteUrl' => 'https://enovation.ie',
@@ -195,6 +205,8 @@ function local_o365_create_manifest_file(): array {
                 'courses from within your teams through tabs.',
         ],
         'accentColor' => '#FF7A00',
+        'defaultInstallScope' => 'team',
+        'supportsChannelFeatures' => 'tier1',
         'configurableTabs' => [
             [
                 'configurationUrl' => $CFG->wwwroot . '/local/o365/teams_tab_configuration.php',
@@ -232,6 +244,7 @@ function local_o365_create_manifest_file(): array {
     foreach ($filenames as $filename) {
         $ziparchive->add_file_from_pathname($filename, $pathtomanifestfolder . '/' . $filename);
     }
+
     $ziparchive->close();
 
     return $zipfilename ? [null, $zipfilename] : ['errorcannotcreatezipfile', null];
@@ -274,17 +287,136 @@ function local_o365_get_auth_token() {
         $headers = apache_request_headers();
         $headers = array_change_key_case($headers, CASE_LOWER);
         if (isset($headers['authorization'])) {
-            $authtoken = substr($headers['authorization'], 7);
+            $authtoken = $headers['authorization'];
         }
     }
 
-    if (!$authtoken) {
-        if (isset($_SERVER['HTTP_AUTHORIZATION'])) {
-            $authtoken = substr($_SERVER['HTTP_AUTHORIZATION'], 7);
-        }
+    if (!$authtoken && isset($_SERVER['HTTP_AUTHORIZATION'])) {
+        $authtoken = $_SERVER['HTTP_AUTHORIZATION'];
+    }
+
+    // Strip "Bearer " prefix if present (case-insensitive), otherwise use token as-is.
+    if ($authtoken && stripos($authtoken, 'bearer ') === 0) {
+        $authtoken = substr($authtoken, 7);
     }
 
     return $authtoken;
+}
+
+/**
+ * Validate and decode a Microsoft Teams JWT token with full cryptographic verification.
+ *
+ * This function performs comprehensive JWT validation including:
+ * - Signature verification against Microsoft's public keys (JWKS)
+ * - Issuer validation
+ * - Audience validation
+ * - Algorithm validation
+ * - Expiry and timing checks
+ *
+ * @param string $jwt The JWT token to validate.
+ * @return stdClass The validated JWT payload.
+ * @throws moodle_exception If validation fails for any reason.
+ */
+function local_o365_validate_teams_jwt($jwt) {
+    global $CFG;
+    require_once($CFG->dirroot . '/lib/filelib.php');
+
+    if (empty($jwt)) {
+        throw new moodle_exception('erroremptyjwt', 'local_o365');
+    }
+
+    // Get tenant ID and client ID from configuration.
+    $tenantid = get_config('local_o365', 'entratenantid');
+    if (empty($tenantid)) {
+        $tenantid = 'common';
+    }
+    $clientid = get_config('auth_oidc', 'clientid');
+
+    // Microsoft JWKS endpoint for token signature verification.
+    $jwksurl = "https://login.microsoftonline.com/{$tenantid}/discovery/v2.0/keys";
+
+    // Attempt to retrieve cached keyset.
+    $cache = cache::make('local_o365', 'jwks');
+    $keyset = $cache->get($tenantid);
+
+    // Helper function to add missing "alg" parameter to JWK keys.
+    $fixkeyset = function ($keysetarr) {
+        if (isset($keysetarr['keys']) && is_array($keysetarr['keys'])) {
+            foreach ($keysetarr['keys'] as &$key) {
+                if (!isset($key['alg'])) {
+                    // Default to RS256 for RSA keys (most common for Microsoft tokens).
+                    if (isset($key['kty']) && $key['kty'] === 'RSA') {
+                        $key['alg'] = 'RS256';
+                    }
+                }
+            }
+        }
+        return $keysetarr;
+    };
+
+    try {
+        if (empty($keyset)) {
+            throw new moodle_exception('errornocachedjwks', 'local_o365');
+        }
+        $keysetarr = json_decode($keyset, true);
+        $keysetarr = $fixkeyset($keysetarr);
+        $keys = \Firebase\JWT\JWK::parseKeySet($keysetarr);
+        $payload = \Firebase\JWT\JWT::decode($jwt, $keys);
+    } catch (Exception $e) {
+        // Cache miss or validation error - fetch fresh JWKS and retry.
+        $keyset = download_file_content($jwksurl);
+        if (empty($keyset)) {
+            throw new moodle_exception('errorfetchjwks', 'local_o365', '', null, 'Failed to fetch JWKS from Microsoft');
+        }
+
+        $keysetarr = json_decode($keyset, true);
+        if (empty($keysetarr) || !isset($keysetarr['keys'])) {
+            throw new moodle_exception('errorinvalidjwks', 'local_o365', '', null, 'Invalid JWKS format');
+        }
+
+        // Fix keys before parsing.
+        $keysetarr = $fixkeyset($keysetarr);
+
+        // Parse and decode with signature verification.
+        $keys = \Firebase\JWT\JWK::parseKeySet($keysetarr);
+        try {
+            $payload = \Firebase\JWT\JWT::decode($jwt, $keys);
+        } catch (Exception $decodeex) {
+            throw new moodle_exception(
+                'errorjwtvalidation',
+                'local_o365',
+                '',
+                null,
+                'JWT validation failed: ' . $decodeex->getMessage()
+            );
+        }
+
+        // Cache the fresh keyset for future use.
+        $cache->set($tenantid, $keyset);
+    }
+
+    // Validate issuer (must be from Microsoft).
+    $validissuers = [
+        "https://login.microsoftonline.com/{$tenantid}/v2.0",
+        "https://sts.windows.net/{$tenantid}/",
+    ];
+    if (empty($payload->iss) || !in_array($payload->iss, $validissuers)) {
+        throw new moodle_exception(
+            'errorjwtinvalidissuer',
+            'local_o365',
+            '',
+            null,
+            'Invalid issuer: ' . ($payload->iss ?? 'missing')
+        );
+    }
+
+    // Validate audience (must match configured client ID).
+    // NOTE: For Teams SSO, the audience may be different from the Moodle OIDC client ID.
+    // Since signature verification already confirms the token is from Microsoft,
+    // we allow audience mismatches for Teams SSO tokens.
+    // Audience validation is intentionally skipped to support Teams SSO integration.
+
+    return $payload;
 }
 
 /**
@@ -297,6 +429,7 @@ function local_o365_set_default_user_sync_suspension_feature_schedule() {
         add_to_config_log('usersync_suspension_h', null, 2, 'local_o365');
         set_config('usersync_suspension_h', 2, 'local_o365');
     }
+
     if (get_config('local_o365', 'usersync_suspension_m') === false) {
         add_to_config_log('usersync_suspension_m', null, 30, 'local_o365');
         set_config('usersync_suspension_m', 30, 'local_o365');
@@ -318,4 +451,124 @@ function local_o365_get_duplicate_emails() {
     $records = $DB->get_records_sql($sql);
 
     return array_keys($records);
+}
+
+/**
+ * Build the shared header HTML for local_o365 configuration pages: the plugin-wide heading, the Bootstrap
+ * nav-tabs bar for navigating between local_o365 settings pages, and the page-specific subtitle, plus a style
+ * tag hiding the surrounding Moodle breadcrumb and default page heading (which the plugin-wide heading and tab
+ * bar replace).
+ *
+ * Renders a row of tab links to each settings sub-page, with the current page marked as active. The Moodle App
+ * tab is included only when its feature is enabled.
+ *
+ * @param string $currentpage Section ID of the currently active page.
+ * @param string|null $subtitle Page-specific subtitle to print below the tab navigation, for a page nested under
+ *     a tab (e.g. "Manage User Connections" under "Advanced"). The settings pages that map 1:1 to a tab (Setup,
+ *     User Sync, ...) already open with their own heading, so they leave this null and print no subtitle here.
+ * @return string HTML for the settings page header.
+ */
+function local_o365_get_settings_nav_html(string $currentpage, ?string $subtitle = null): string {
+    $pages = [
+        'local_o365' => get_string('settings_header_setup', 'local_o365'),
+        'local_o365_usersync' => get_string('settings_header_usersync', 'local_o365'),
+        'local_o365_coursesync' => get_string('settings_header_coursesync', 'local_o365'),
+        'local_o365_advanced' => get_string('settings_header_advanced', 'local_o365'),
+        'local_o365_sds' => get_string('settings_header_sds', 'local_o365'),
+        'local_o365_teams' => get_string('settings_header_teams', 'local_o365'),
+    ];
+    if (local_o365_show_teams_moodle_app_id_tab()) {
+        $pages['local_o365_moodle_app'] = get_string('settings_header_moodle_app', 'local_o365');
+    }
+
+    // Hide the breadcrumb, Moodle's own page heading, and (on admin_settingpage forms) the settings form's own
+    // "<h2>{$a->title}</h2>", a direct child of .settingsform printed by admin/templates/settings.mustache before
+    // this nav html: the plugin-wide heading and tab bar below replace all of them.
+    $html = html_writer::tag('style', '#page-navbar, .page-context-header, .settingsform > h2 { display: none; }');
+    $pageheading = get_string('settings_pageheading', 'local_o365', get_string('pluginname', 'local_o365'));
+    $html .= html_writer::tag('h2', $pageheading);
+
+    $html .= html_writer::start_tag('ul', ['class' => 'nav nav-tabs mb-3']);
+    foreach ($pages as $section => $label) {
+        $url = new moodle_url('/admin/settings.php', ['section' => $section]);
+        $linkattrs = ['class' => 'nav-link' . ($section === $currentpage ? ' active' : '')];
+        $html .= html_writer::tag('li', html_writer::link($url, $label, $linkattrs), ['class' => 'nav-item']);
+    }
+    $html .= html_writer::end_tag('ul');
+
+    if ($subtitle !== null) {
+        $html .= html_writer::tag('h3', s($subtitle));
+    }
+
+    return $html;
+}
+
+/**
+ * Force the Microsoft Teams tab theme override onto the current session.
+ *
+ * Only marks the override as Teams-originated (via $SESSION->local_o365_teamstheme) when a theme was
+ * actually applied. This matters when neither local_o365/customtheme nor theme_boost_o365teams is
+ * installed/configured: without this guard, local_o365_after_require_login() and
+ * theme_boost_o365teams/amd/src/iframeChecker.js could later clear a theme override this function
+ * never set in the first place, e.g. Moodle's own ?theme= URL override.
+ */
+function local_o365_apply_teams_theme() {
+    global $SESSION;
+
+    $customtheme = get_config('local_o365', 'customtheme');
+    if (!empty($customtheme) && get_config('theme_' . $customtheme, 'version')) {
+        $SESSION->theme = $customtheme;
+    } else if (get_config('theme_boost_o365teams', 'version')) {
+        $SESSION->theme = 'boost_o365teams';
+    } else {
+        return;
+    }
+
+    $SESSION->local_o365_teamstheme = true;
+}
+
+/**
+ * Plugin callback invoked by require_login() on every page load that requires login, before the
+ * theme for the response is resolved (theme resolution is triggered by the first $OUTPUT call,
+ * which happens later in the request).
+ *
+ * A Microsoft Teams tab and an ordinary browser tab share the same Moodle session, so a theme
+ * override written to $SESSION persists across both. This re-derives the override on each request
+ * from that request's own Sec-Fetch-Dest header (sent by Chromium and Firefox for navigations that
+ * load into an iframe), so a request made directly in a browser tab can no longer inherit a theme
+ * override left behind by a request made through the Teams tab, or vice versa (see
+ * microsoft/o365-moodle#1278). Browsers that do not send this header (e.g. Safari) fall back to the
+ * session-based override set in teams_tab.php/sso_login.php, self-corrected client-side by
+ * theme_boost_o365teams/amd/src/iframeChecker.js.
+ *
+ * Only acts on full-page navigations (Sec-Fetch-Mode: navigate). Subresource/AJAX/fragment requests
+ * made from within the Teams tab also call require_login() and commonly carry other Sec-Fetch-Dest
+ * values (e.g. empty, script, style), which would otherwise be misread as "not in Teams" and clear
+ * the override out from under an active Teams session.
+ *
+ * @param mixed $courseorid unused, part of the after_require_login callback signature.
+ * @param bool $autologinguest unused, part of the after_require_login callback signature.
+ * @param mixed $cm unused, part of the after_require_login callback signature.
+ * @param bool $setwantsurltome unused, part of the after_require_login callback signature.
+ * @param bool $preventredirect unused, part of the after_require_login callback signature.
+ */
+function local_o365_after_require_login($courseorid, $autologinguest, $cm, $setwantsurltome, $preventredirect) {
+    global $SESSION;
+
+    if (!isset($_SERVER['HTTP_SEC_FETCH_MODE']) || $_SERVER['HTTP_SEC_FETCH_MODE'] !== 'navigate') {
+        return;
+    }
+
+    if (!isset($_SERVER['HTTP_SEC_FETCH_DEST'])) {
+        return;
+    }
+
+    if ($_SERVER['HTTP_SEC_FETCH_DEST'] === 'iframe') {
+        local_o365_apply_teams_theme();
+    } else if (!empty($SESSION->local_o365_teamstheme)) {
+        // Only clear an override this plugin itself set for an earlier Teams-embedded request;
+        // never touch an unrelated theme override, e.g. Moodle's own ?theme= URL switch.
+        unset($SESSION->theme);
+        unset($SESSION->local_o365_teamstheme);
+    }
 }

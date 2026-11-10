@@ -29,7 +29,7 @@ defined('MOODLE_INTERNAL') || die();
 
 global $CFG;
 
-require_once($CFG->dirroot.'/lib/formslib.php');
+require_once($CFG->dirroot . '/lib/formslib.php');
 
 /**
  * Single, manual user match form.
@@ -57,13 +57,31 @@ class manualusermatch extends \moodleform {
 
         $mform->addElement('header', 'userdetails', get_string('userdetails'));
 
-        $musernametext = fullname($userrec).' ('.$userrec->username.')';
+        $musernametext = fullname($userrec) . ' (' . $userrec->username . ')';
         $label = get_string('acp_userconnections_manualmatch_musername', 'local_o365');
         $mform->addElement('static', 'musername', $label, $musernametext);
         $mform->addElement('text', 'o365username', get_string('acp_userconnections_manualmatch_o365username', 'local_o365'));
         $mform->addElement('checkbox', 'uselogin', get_string('acp_userconnections_manualmatch_uselogin', 'local_o365'));
         $mform->setType('o365username', PARAM_TEXT);
+        $mform->addRule('o365username', get_string('required'), 'required', null, 'client');
 
         $this->add_action_buttons();
+    }
+
+    /**
+     * Form validation.
+     *
+     * @param array $data Submitted data.
+     * @param array $files Submitted files.
+     * @return array Validation errors indexed by element name.
+     */
+    public function validation($data, $files) {
+        $errors = parent::validation($data, $files);
+
+        if (trim($data['o365username']) === '') {
+            $errors['o365username'] = get_string('required');
+        }
+
+        return $errors;
     }
 }

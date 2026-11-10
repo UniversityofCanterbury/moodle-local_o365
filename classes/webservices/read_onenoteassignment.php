@@ -27,7 +27,7 @@ namespace local_o365\webservices;
 
 defined('MOODLE_INTERNAL') || die();
 
-use context_course;
+use core\context\course;
 use core_external\external_api;
 use core_external\external_function_parameters;
 use core_external\external_single_structure;
@@ -64,10 +64,12 @@ class read_onenoteassignment extends external_api {
     public static function assignment_read($data) {
         $params = self::validate_parameters(self::assignment_read_parameters(), ['data' => $data]);
         $params = $params['data'];
-        [$course, $module, $assign] = utils::verify_assignment($params['coursemodule'],
-            $params['course']);
+        [$course, $module, $assign] = utils::verify_assignment(
+            $params['coursemodule'],
+            $params['course']
+        );
 
-        $context = context_course::instance($params['course']);
+        $context = course::instance($params['course']);
         self::validate_context($context);
 
         $modinfo = utils::get_assignment_return_info($module->id, $course->id);

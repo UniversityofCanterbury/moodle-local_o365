@@ -26,11 +26,13 @@
 
 namespace local_o365\adminsetting;
 
+use core\url;
+
 defined('MOODLE_INTERNAL') || die();
 
 global $CFG;
 
-require_once($CFG->dirroot.'/lib/adminlib.php');
+require_once($CFG->dirroot . '/lib/adminlib.php');
 
 /**
  * Admin setting to configure course sync.
@@ -52,7 +54,16 @@ class coursesync extends \admin_setting {
      * @return string empty string if ok, string error message otherwise
      */
     public function write_setting($data) {
+        $previousvalue = $this->get_setting();
+
         $this->config_write($this->name, $data);
+
+        if ($previousvalue === 'onall' && $data === 'oncustom') {
+            // Switching from "All Features Enabled" to "Customize" - seed the individual course sync list with
+            // courses that already have a Microsoft 365 group, so they are not suddenly treated as disabled.
+            \local_o365\feature\coursesync\utils::seed_customize_list_from_existing_groups();
+        }
+
         return '';
     }
 
@@ -66,7 +77,7 @@ class coursesync extends \admin_setting {
     public function output_html($data, $query = '') {
         $settinghtml = '';
 
-        $customizeurl = new \moodle_url('/local/o365/acp.php', ['mode' => 'coursesynccustom']);
+        $customizeurl = new url('/local/o365/acp.php', ['mode' => 'coursesynccustom']);
         $options = [
             'off' => get_string('acp_coursesynccustom_off', 'local_o365'),
             'oncustom' => get_string('acp_coursesynccustom_oncustom', 'local_o365', $customizeurl->out()),
@@ -76,7 +87,7 @@ class coursesync extends \admin_setting {
         foreach ($options as $key => $desc) {
             $radioattrs = [
                 'type' => 'radio',
-                'id' => $this->get_id().'_'.$key,
+                'id' => $this->get_id() . '_' . $key,
                 'name' => $this->get_full_name(),
                 'value' => $key,
                 'onchange' => 'teams_togglecustom()',
@@ -85,11 +96,13 @@ class coursesync extends \admin_setting {
             if ($curval === $key) {
                 $radioattrs['checked'] = 'checked';
             }
+
             $settinghtml .= \html_writer::empty_tag('input', $radioattrs);
-            $settinghtml .= \html_writer::label($desc, $this->get_id().'_'.$key, false);
+            $settinghtml .= \html_writer::label($desc, $this->get_id() . '_' . $key, false);
             $settinghtml .= \html_writer::empty_tag('br');
             $settinghtml .= \html_writer::empty_tag('br');
         }
+
         $js = <<<JS
 function teams_togglecustom() {
     if ($("#id_s_local_o365_coursesync_oncustom").is(":checked")) {

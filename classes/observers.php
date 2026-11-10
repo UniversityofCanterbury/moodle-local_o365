@@ -32,7 +32,7 @@ use auth_oidc\event\user_disconnected;
 use auth_oidc\event\user_loggedin;
 use auth_oidc\jwt;
 use backup;
-use context_system;
+use core\context\system;
 use core\event\capability_assigned;
 use core\event\capability_unassigned;
 use core\event\config_log_created;
@@ -57,8 +57,9 @@ use local_o365\obj\o365user;
 use local_o365\rest\unified;
 use local_o365\task\groupmembershipsync;
 use local_o365\task\processcourserequestapproval;
+use local_o365\task\usergroupmembershipsync;
 use moodle_exception;
-use moodle_url;
+use core\url;
 
 defined('MOODLE_INTERNAL') || die();
 
@@ -83,7 +84,7 @@ class observers {
      */
     public static function handle_oidc_user_authed(user_authed $event): bool {
         require_login();
-        require_capability('moodle/site:config', context_system::instance());
+        require_capability('moodle/site:config', system::instance());
 
         $eventdata = $event->get_data();
 
@@ -102,12 +103,13 @@ class observers {
                             if ($existingentratenantid != $tenant) {
                                 add_to_config_log('entratenantid', $existingentratenantid, $tenant, 'local_o365');
                             }
+
                             set_config('entratenantid', $tenant, 'local_o365');
                         }
                     }
                 }
 
-                redirect(new moodle_url('/admin/settings.php?section=local_o365'));
+                redirect(new url('/admin/settings.php?section=local_o365'));
                 break;
 
             case 'addtenant':
@@ -142,7 +144,6 @@ class observers {
                     $domainnames = $apiclient->get_all_domain_names_in_tenant();
                     if ($domainnames) {
                         $domainsfetched = true;
-
                     }
                 } catch (moodle_exception $e) {
                     // Do nothing.
@@ -157,7 +158,7 @@ class observers {
                 $tenantid = utils::get_tenant_from_idtoken($idtoken);
                 utils::enableadditionaltenant($tenantid, $domainnames);
 
-                redirect(new moodle_url('/local/o365/acp.php', ['mode' => 'tenants']));
+                redirect(new url('/local/o365/acp.php', ['mode' => 'tenants']));
                 break;
 
             default:
@@ -193,6 +194,7 @@ class observers {
                     if (stripos($userrecord->username, '_ext_') !== false) {
                         $isguestuser = true;
                     }
+
                     if (empty($userobject)) {
                         try {
                             $apiclient = utils::get_api();
@@ -202,7 +204,7 @@ class observers {
                                 return true;
                             }
                         } catch (moodle_exception $e) {
-                            utils::debug('Exception: '.$e->getMessage(), __METHOD__, $e);
+                            utils::debug('Exception: ' . $e->getMessage(), __METHOD__, $e);
                             return true;
                         }
 
@@ -240,8 +242,11 @@ class observers {
 
                                 foreach ($courses as $courseid => $course) {
                                     if (\local_o365\feature\coursesync\utils::is_course_sync_enabled($courseid) == true) {
-                                        \local_o365\feature\coursesync\utils::sync_user_role_in_course_group($userid, $courseid,
-                                                $userobjectdata->id);
+                                        \local_o365\feature\coursesync\utils::sync_user_role_in_course_group(
+                                            $userid,
+                                            $courseid,
+                                            $userobjectdata->id
+                                        );
                                     }
                                 }
                             }
@@ -257,6 +262,7 @@ class observers {
                 return false;
             }
         }
+
         return false;
     }
 
@@ -282,6 +288,7 @@ class observers {
         if (empty($eventdata['objectid'])) {
             return false;
         }
+
         $createduserid = $eventdata['objectid'];
 
         $user = $DB->get_record('user', ['id' => $createduserid]);
@@ -343,7 +350,7 @@ class observers {
      * @return bool Success/Failure.
      */
     public static function get_additional_user_info(int $userid): bool {
-        global $DB;
+        global $DB, $USER;
 
         try {
             // Graph API must be configured for us to fetch data.
@@ -375,6 +382,7 @@ class observers {
                         $metadata = json_encode(['odburl' => $odburl]);
                     }
                 }
+
                 $now = time();
                 $userobjectdata = (object)[
                     'type' => 'user',
@@ -396,7 +404,14 @@ class observers {
             $usersync = new feature\usersync\main();
             if (isset($usersyncsettings['photosynconlogin'])) {
                 $usersync->assign_photo($userid);
+
+                // The session user object was loaded before the photo changed; refresh the picture so that
+                // the new photo is shown immediately instead of after the next login.
+                if (!empty($USER->id) && $USER->id == $userid) {
+                    $USER->picture = $DB->get_field('user', 'picture', ['id' => $userid]);
+                }
             }
+
             if (isset($usersyncsettings['tzsynconlogin'])) {
                 $usersync->sync_timezone($userid);
             }
@@ -405,6 +420,7 @@ class observers {
         } catch (moodle_exception $e) {
             utils::debug($e->getMessage(), __METHOD__, $e);
         }
+
         return false;
     }
 
@@ -425,12 +441,17 @@ class observers {
             return false;
         }
 
-        if (utils::is_connected() !== true || \local_o365\feature\coursesync\utils::is_enabled() !== true ||
-            \local_o365\feature\coursesync\utils::is_course_sync_enabled($event->courseid) !== true) {
+        if (
+            utils::is_connected() !== true || \local_o365\feature\coursesync\utils::is_enabled() !== true ||
+            \local_o365\feature\coursesync\utils::is_course_sync_enabled($event->courseid) !== true
+        ) {
             return false;
         }
 
-        return \local_o365\feature\coursesync\utils::sync_user_role_in_course_group($event->relateduserid, $event->courseid);
+        $task = new usergroupmembershipsync();
+        $task->set_custom_data(['userid' => $event->relateduserid, 'courseid' => $event->courseid, 'excluderoleid' => 0]);
+        manager::queue_adhoc_task($task, true);
+        return true;
     }
 
     /**
@@ -458,8 +479,10 @@ class observers {
             return false;
         }
 
-        if (utils::is_connected() !== true || \local_o365\feature\coursesync\utils::is_enabled() !== true ||
-            \local_o365\feature\coursesync\utils::is_course_sync_enabled($courseid) !== true) {
+        if (
+            utils::is_connected() !== true || \local_o365\feature\coursesync\utils::is_enabled() !== true ||
+            \local_o365\feature\coursesync\utils::is_course_sync_enabled($courseid) !== true
+        ) {
             return false;
         }
 
@@ -472,7 +495,7 @@ class observers {
         // If the course is an SDS course and the SDS enrolment sync option is off, don't update enrolment.
         if ($DB->record_exists('local_o365_objects', ['type' => 'sdssection', 'moodleid' => $courseid])) {
             // SDS course.
-            if (!get_config('local_o365', 'sdsenrolmentenabled') || !get_config('local_o365', 'sdssyncenrolmenttosds')) {
+            if (!get_config('local_o365', 'sdssyncenrolmenttosds')) {
                 return false;
             }
         }
@@ -481,9 +504,19 @@ class observers {
         $userenrolmentsrecordset = $DB->get_recordset('user_enrolments', ['enrolid' => $event->objectid]);
 
         foreach ($userenrolmentsrecordset as $userenrolment) {
-            \local_o365\feature\coursesync\utils::sync_user_role_in_course_group($userenrolment->userid, $courseid, 0,
-                $coursegroupobjectrecordid, true);
+            $task = new usergroupmembershipsync();
+            $task->set_custom_data(
+                [
+                    'userid' => $userenrolment->userid,
+                    'courseid' => $courseid,
+                    'excluderoleid' => 0,
+                    'coursegroupobjectrecordid' => $coursegroupobjectrecordid,
+                    'sdscoursechecked' => true,
+                ]
+            );
+            manager::queue_adhoc_task($task, true);
         }
+
         $userenrolmentsrecordset->close();
 
         return true;
@@ -514,8 +547,10 @@ class observers {
         $shortnametocheck = $course->shortname;
 
         // First, try to get a record with an exact match on shortname.
-        $customrequest = $DB->get_record('local_o365_course_request',
-            ['courseshortname' => $shortnametocheck, 'requeststatus' => feature\courserequest\main::COURSE_REQUEST_STATUS_PENDING]);
+        $customrequest = $DB->get_record(
+            'local_o365_course_request',
+            ['courseshortname' => $shortnametocheck, 'requeststatus' => feature\courserequest\main::COURSE_REQUEST_STATUS_PENDING]
+        );
 
         // If no exact match, try removing the suffix _(number).
         if (!$customrequest && preg_match('/^(.+)_(\d+)$/', $course->shortname, $matches)) {
@@ -532,8 +567,8 @@ class observers {
             manager::queue_adhoc_task($task);
         }
 
-        // Enable team sync for newly created courses if the create teams setting is "custom", and the option to enable sync on
-        // new courses by default is on.
+        // Enable team sync for newly created courses if the create teams setting is "custom",
+        // and the option to enable sync on new courses by default is on.
         if (!$coursecreatedfromcustomcourserequest) {
             $syncnewcoursesetting = get_config('local_o365', 'sync_new_course');
             if ((get_config('local_o365', 'coursesync') === 'oncustom') && $syncnewcoursesetting) {
@@ -561,12 +596,14 @@ class observers {
 
         $eventdata = $event->get_data();
 
-        // Enable team sync for newly restored courses if the create teams setting is "custom", and the option to enable sync on
-        // new courses by default is on.
+        // Enable team sync for newly restored courses if the create teams setting is "custom",
+        // and the option to enable sync on new courses by default is on.
         $syncnewcoursesetting = get_config('local_o365', 'sync_new_course');
         if ((get_config('local_o365', 'coursesync') === 'oncustom') && $syncnewcoursesetting) {
-            if (isset($eventdata['other']) && isset($eventdata['other']['target']) &&
-                $eventdata['other']['target'] == backup::TARGET_NEW_COURSE) {
+            if (
+                isset($eventdata['other']) && isset($eventdata['other']['target']) &&
+                $eventdata['other']['target'] == backup::TARGET_NEW_COURSE
+            ) {
                 \local_o365\feature\coursesync\utils::set_course_sync_enabled($event->objectid, true);
             }
         }
@@ -587,6 +624,7 @@ class observers {
         if (utils::is_connected() !== true) {
             return false;
         }
+
         $courseid = $event->objectid;
         $eventdata = $event->get_data();
         if (!empty($eventdata['other'])) {
@@ -623,6 +661,7 @@ class observers {
         if (utils::is_connected() !== true) {
             return false;
         }
+
         $courseid = $event->objectid;
 
         // Delete SDS section record, or delete connected group.
@@ -635,8 +674,11 @@ class observers {
         }
 
         // Delete group mapping records.
-        $DB->delete_records_select('local_o365_objects',
-            "type = 'group' AND subtype in ('course', 'courseteam', 'teamfromgroup') AND moodleid = ?", [$courseid]);
+        $DB->delete_records_select(
+            'local_o365_objects',
+            "type = 'group' AND subtype in ('course', 'courseteam', 'teamfromgroup') AND moodleid = ?",
+            [$courseid]
+        );
 
         return true;
     }
@@ -662,9 +704,14 @@ class observers {
         }
 
         // Update group membership.
-        if (\local_o365\feature\coursesync\utils::is_enabled() === true &&
-            \local_o365\feature\coursesync\utils::is_course_sync_enabled($event->courseid) === true) {
-            return \local_o365\feature\coursesync\utils::sync_user_role_in_course_group($event->relateduserid, $event->courseid);
+        if (
+            \local_o365\feature\coursesync\utils::is_enabled() === true &&
+            \local_o365\feature\coursesync\utils::is_course_sync_enabled($event->courseid) === true
+        ) {
+            $task = new usergroupmembershipsync();
+            $task->set_custom_data(['userid' => $event->relateduserid, 'courseid' => $event->courseid, 'excluderoleid' => 0]);
+            manager::queue_adhoc_task($task, true);
+            return true;
         }
 
         return true;
@@ -685,15 +732,26 @@ class observers {
         if ($courseusersyncdirection == COURSE_USER_SYNC_DIRECTION_TEAMS_TO_MOODLE) {
             return false;
         }
+
         if (utils::is_connected() !== true) {
             return false;
         }
 
         // Update group membership.
-        if (\local_o365\feature\coursesync\utils::is_enabled() === true &&
-            \local_o365\feature\coursesync\utils::is_course_sync_enabled($event->courseid) === true) {
-            return \local_o365\feature\coursesync\utils::sync_user_role_in_course_group($event->relateduserid, $event->courseid, 0,
-                0, false, $event->objectid);
+        if (
+            \local_o365\feature\coursesync\utils::is_enabled() === true &&
+            \local_o365\feature\coursesync\utils::is_course_sync_enabled($event->courseid) === true
+        ) {
+            $task = new usergroupmembershipsync();
+            $task->set_custom_data(
+                [
+                    'userid' => $event->relateduserid,
+                    'courseid' => $event->courseid,
+                    'excluderoleid' => $event->objectid,
+                ]
+            );
+            manager::queue_adhoc_task($task, true);
+            return true;
         }
 
         return true;
@@ -714,8 +772,12 @@ class observers {
         // Resync owners and members in the groups connected to enabled Moodle courses.
         if (utils::is_connected() === true) {
             $data = $event->get_data();
-            if (isset($data['other']['capability']) && in_array($data['other']['capability'],
-                    ['local/o365:teammember', 'local/o365:teamowner'])) {
+            if (
+                isset($data['other']['capability']) && in_array(
+                    $data['other']['capability'],
+                    ['local/o365:teammember', 'local/o365:teamowner']
+                )
+            ) {
                 $existingtasks = manager::get_adhoc_tasks('\local_o365\task\groupmembershipsync');
                 if (empty($existingtasks)) {
                     $groupmembershipsync = new groupmembershipsync();
@@ -790,8 +852,7 @@ class observers {
                     // Clear local_o365_token table.
                     $DB->delete_records('local_o365_token');
 
-                    // Clear auth_oidc_token table.
-                    $DB->delete_records('auth_oidc_token');
+                    // The auth_oidc_token table is cleared by auth_oidc's own observer on this event.
 
                     // Clear local_o365_connections table.
                     $DB->delete_records('local_o365_connections');
@@ -800,9 +861,13 @@ class observers {
                     $DB->delete_records('local_o365_objects', ['type' => 'user']);
 
                     // Delete delta user token, and force a user sync task run.
-                    unset_config('local_o365', 'task_usersync_lastdeltatoken');
-                    if ($usersynctask = $DB->get_record('task_scheduled',
-                        ['component' => 'local_o365', 'classname' => '\local_o365\task\usersync'])) {
+                    unset_config('task_usersync_lastdeltatoken', 'local_o365');
+                    if (
+                        $usersynctask = $DB->get_record(
+                            'task_scheduled',
+                            ['component' => 'local_o365', 'classname' => '\local_o365\task\usersync']
+                        )
+                    ) {
                         $usersynctask->nextruntime = time();
                         $DB->update_record('task_scheduled', $usersynctask);
                     }

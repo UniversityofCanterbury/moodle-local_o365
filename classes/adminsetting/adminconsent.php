@@ -25,11 +25,13 @@
 
 namespace local_o365\adminsetting;
 
+use core\url;
+
 defined('MOODLE_INTERNAL') || die();
 
 global $CFG;
 
-require_once($CFG->dirroot.'/lib/adminlib.php');
+require_once($CFG->dirroot . '/lib/adminlib.php');
 
 /**
  * Admin setting to provide admin consent for API permissions.
@@ -51,13 +53,14 @@ class adminconsent extends \admin_setting {
      * @param mixed $paramtype int means PARAM_XXX type, string is a allowed format in regex
      * @param int $size default field size
      */
-    public function __construct($name, $visiblename, $description, $defaultsetting, $paramtype=PARAM_RAW, $size=null) {
+    public function __construct($name, $visiblename, $description, $defaultsetting, $paramtype = PARAM_RAW, $size = null) {
         $this->paramtype = $paramtype;
         if (!is_null($size)) {
             $this->size = $size;
         } else {
             $this->size = ($paramtype === PARAM_INT) ? 5 : 30;
         }
+
         parent::__construct($name, $visiblename, $description, $defaultsetting);
     }
 
@@ -88,9 +91,9 @@ class adminconsent extends \admin_setting {
      * @param string $query
      * @return string
      */
-    public function output_html($data, $query='') {
-        $settinghtml = '<input type="hidden" id="'.$this->get_id().'" name="'.$this->get_full_name().'" value="0" />';
-        $setuserurl = new \moodle_url('/local/o365/acp.php', ['mode' => 'adminconsent']);
+    public function output_html($data, $query = '') {
+        $settinghtml = '<input type="hidden" id="' . $this->get_id() . '" name="' . $this->get_full_name() . '" value="0" />';
+        $setuserurl = new url('/local/o365/acp.php', ['mode' => 'adminconsent', 'sesskey' => sesskey()]);
 
         $linkstr = get_string('settings_adminconsent_btn', 'local_o365');
         $message = \html_writer::link($setuserurl, $linkstr, ['class' => 'btn btn-primary', 'style' => 'margin-bottom: 0.5rem']);

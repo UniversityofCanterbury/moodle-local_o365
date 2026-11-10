@@ -25,8 +25,8 @@
 
 namespace local_o365\webservices;
 
-use context_course;
-use context_helper;
+use core\context\course;
+use core\context\helper;
 use moodle_exception;
 use stdClass;
 
@@ -113,8 +113,9 @@ class read_courseusers extends external_api {
         if ($courseid == SITEID) {
             return [];
         }
+
         $course = $DB->get_record('course', ['id' => $courseid], '*', MUST_EXIST);
-        $context = context_course::instance($courseid);
+        $context = course::instance($courseid);
         self::validate_context($context);
 
         try {
@@ -131,7 +132,7 @@ class read_courseusers extends external_api {
         [$enrolledsql, $enrolledparams] = get_enrolled_sql($context, $withcapability);
 
         // For user context preloading.
-        $ctxselect = ', ' . context_helper::get_preload_record_columns_sql('ctx');
+        $ctxselect = ', ' . helper::get_preload_record_columns_sql('ctx');
         $ctxjoin = "LEFT JOIN {context} ctx ON (ctx.instanceid = u.id AND ctx.contextlevel = :contextlevel)";
         $enrolledparams['contextlevel'] = CONTEXT_USER;
 
@@ -168,11 +169,12 @@ class read_courseusers extends external_api {
             }
 
             // Get user info.
-            context_helper::preload_from_record($user);
+            helper::preload_from_record($user);
             if ($userdetails = user_get_user_details($user, $course, $userfields)) {
                 $users[] = $userdetails;
             }
         }
+
         $enrolledusers->close();
 
         return $users;
@@ -188,18 +190,30 @@ class read_courseusers extends external_api {
             new external_single_structure(
                 [
                     'id' => new external_value(PARAM_INT, 'ID of the user'),
-                    'username' => new external_value(PARAM_RAW, 'Username policy is defined in Moodle security config',
-                        VALUE_OPTIONAL),
+                    'username' => new external_value(
+                        PARAM_RAW,
+                        'Username policy is defined in Moodle security config',
+                        VALUE_OPTIONAL
+                    ),
                     'fullname' => new external_value(PARAM_NOTAGS, 'The fullname of the user'),
                     'firstname' => new external_value(PARAM_NOTAGS, 'The first name(s) of the user', VALUE_OPTIONAL),
                     'lastname' => new external_value(PARAM_NOTAGS, 'The family name of the user', VALUE_OPTIONAL),
                     'email' => new external_value(PARAM_TEXT, 'An email address - allow email as root@localhost', VALUE_OPTIONAL),
-                    'idnumber' => new external_value(PARAM_RAW, 'An arbitrary ID code number perhaps from the institution',
-                        VALUE_OPTIONAL),
-                    'lang' => new external_value(PARAM_RAW, 'An arbitrary ID code number perhaps from the institution',
-                        VALUE_OPTIONAL),
-                    'profileimageurlsmall' => new external_value(PARAM_URL, 'User image profile URL - small version',
-                        VALUE_OPTIONAL),
+                    'idnumber' => new external_value(
+                        PARAM_RAW,
+                        'An arbitrary ID code number perhaps from the institution',
+                        VALUE_OPTIONAL
+                    ),
+                    'lang' => new external_value(
+                        PARAM_RAW,
+                        'An arbitrary ID code number perhaps from the institution',
+                        VALUE_OPTIONAL
+                    ),
+                    'profileimageurlsmall' => new external_value(
+                        PARAM_URL,
+                        'User image profile URL - small version',
+                        VALUE_OPTIONAL
+                    ),
                     'profileimageurl' => new external_value(PARAM_URL, 'User image profile URL - big version', VALUE_OPTIONAL),
                 ]
             )

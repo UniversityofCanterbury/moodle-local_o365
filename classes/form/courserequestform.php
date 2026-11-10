@@ -27,18 +27,26 @@ namespace local_o365\form;
 
 defined('MOODLE_INTERNAL') || die();
 
-require_once($CFG->dirroot . '/course/request_form.php');
+$pathbelowmoodle51 = $CFG->dirroot . '/course/request_form.php';
+$pathsincemoodle51 = $CFG->dirroot . '/course/classes/form/request_course.php';
+
+if (file_exists($pathsincemoodle51)) {
+    require_once($pathsincemoodle51);
+    class_alias(\core_course\form\request_course::class, 'local_o365\form\parent_request_course');
+} else {
+    require_once($pathbelowmoodle51);
+    class_alias('course_request_form', 'local_o365\form\parent_request_course');
+}
 
 use core_course_category;
 use course_request;
-use course_request_form;
 use local_o365\feature\courserequest\main;
 use local_o365\utils;
 
 /**
  * A form for a user to request a course.
  */
-class courserequestform extends course_request_form {
+class courserequestform extends parent_request_course {
     /**
      * Form definition.
      *
@@ -55,6 +63,7 @@ class courserequestform extends course_request_form {
             foreach ($pending as $cp) {
                 $list[] = format_string($cp->fullname);
             }
+
             $list = implode(', ', $list);
             $mform->addElement('static', 'pendingcourses', get_string('courses'), $list);
         }
@@ -126,8 +135,12 @@ class courserequestform extends course_request_form {
 
         // If no team options are available, display a static element with a message.
         if ($graphapiunavailable) {
-            $mform->addElement('static', 'team', get_string('courserequest_teams', 'local_o365'),
-                get_string('courserequest_graphapi_disabled', 'local_o365'));
+            $mform->addElement(
+                'static',
+                'team',
+                get_string('courserequest_teams', 'local_o365'),
+                get_string('courserequest_graphapi_disabled', 'local_o365')
+            );
         }
 
         $mform->addRule('team', get_string('courserequest_emptyteams', 'local_o365'), 'required', null, 'client');

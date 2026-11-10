@@ -25,6 +25,8 @@
 
 namespace local_o365\event;
 
+use core\context\system;
+
 /**
  * Event fired whenever a user subscribes to a calendar.
  */
@@ -48,9 +50,10 @@ class api_call_failed extends \core\event\base {
         if (!empty($this->data['other']['debugdata'])) {
             $debugstr = is_scalar($this->data['other']['debugdata'])
                     ? $this->data['other']['debugdata']
-                    : print_r($this->data['other']['debugdata'], true);
+                    : json_encode($this->data['other']['debugdata']);
             $description .= ': ' . $debugstr;
         }
+
         return $description;
     }
 
@@ -60,7 +63,7 @@ class api_call_failed extends \core\event\base {
      * @return void
      */
     protected function init() {
-        $this->context = \context_system::instance();
+        $this->context = system::instance();
         $this->data['crud'] = 'r';
         $this->data['edulevel'] = self::LEVEL_OTHER;
     }

@@ -26,7 +26,7 @@
 
 namespace local_o365\feature\usersync;
 
-use context_user;
+use core\context\user;
 use core_text;
 use core_user;
 use local_o365\oauth2\clientdata;
@@ -54,6 +54,11 @@ require_once($CFG->libdir . '/gdlib.php');
  */
 class main {
     /**
+     * User preference holding the time a user was suspended by the user sync.
+     */
+    public const SUSPENDED_TIME_PREFERENCE = 'local_o365_suspendedtime';
+
+    /**
      * @var clientdata|null
      */
     protected $clientdata = null;
@@ -61,6 +66,56 @@ class main {
      * @var httpclient|null
      */
     protected $httpclient = null;
+
+    /**
+     * Pre-fetched full user records keyed by Moodle user ID, populated during batch sync.
+     *
+     * @var array
+     */
+    protected array $fullusersbymoodleid = [];
+
+    /**
+     * Pre-fetched connection records keyed by Entra ID UPN, populated during batch sync.
+     *
+     * @var array
+     */
+    protected array $connectionsbyentraidupn = [];
+
+    /**
+     * Pre-fetched connection records keyed by Moodle user ID, populated during batch sync.
+     *
+     * @var array
+     */
+    protected array $connectionsbymoodleid = [];
+
+    /**
+     * Pre-fetched O365 object records keyed by object ID, populated during batch sync.
+     *
+     * @var array
+     */
+    protected array $o365objectsbyobjectid = [];
+
+    /**
+     * Pre-fetched O365 object records keyed by Moodle user ID, populated during batch sync.
+     *
+     * @var array
+     */
+    protected array $o365objectsbymoodleid = [];
+
+    /**
+     * Pre-fetched auth_oidc_token records keyed by Moodle user ID, populated during batch sync.
+     * Each user ID maps to an array of token records (may be multiple).
+     *
+     * @var array
+     */
+    protected array $tokensbymoodleid = [];
+
+    /**
+     * Cache object for storing one-time query results across batches.
+     *
+     * @var stdClass|null
+     */
+    protected ?stdClass $synccache = null;
 
     /**
      * Constructor
@@ -71,14 +126,20 @@ class main {
      * @throws moodle_exception
      */
     public function __construct(?clientdata $clientdata = null, ?httpclient $httpclient = null) {
-        if (!PHPUNIT_TEST && !defined('BEHAT_SITE_RUNNING')) {
-            $this->clientdata = (!empty($clientdata))
-                ? $clientdata
-                : clientdata::instance_from_oidc();
+        if (!empty($clientdata)) {
+            // Always accept explicitly-injected clientdata (including test mocks).
+            $this->clientdata = $clientdata;
+        } else if (!PHPUNIT_TEST && !defined('BEHAT_SITE_RUNNING')) {
+            // Only fall back to config-derived clientdata outside test context.
+            $this->clientdata = clientdata::instance_from_oidc();
+        }
 
-            $this->httpclient = (!empty($httpclient))
-                ? $httpclient
-                : new httpclient();
+        if (!empty($httpclient)) {
+            // Always accept explicitly-injected httpclient (including test mocks).
+            $this->httpclient = $httpclient;
+        } else if (!PHPUNIT_TEST && !defined('BEHAT_SITE_RUNNING')) {
+            // Only fall back to a real httpclient outside test context.
+            $this->httpclient = new httpclient();
         }
     }
 
@@ -89,17 +150,15 @@ class main {
      */
     public static function is_enabled() {
         $usersyncsettings = get_config('local_o365', 'usersync');
-        if (!empty($usersyncsettings)) {
-            $usersyncsettings = explode(',', $usersyncsettings);
-            $realsyncoptions = ['create', 'update', 'suspend', 'reenable', 'disabledsync', 'matchswitchauth', 'appassign',
-                'photosync', 'tzsync'];
-            if (!empty(array_intersect($usersyncsettings, $realsyncoptions))) {
-                // At least one sync option is enabled.
-                return true;
-            }
-        } else {
+        if (empty($usersyncsettings)) {
             return false;
         }
+
+        $usersyncsettings = explode(',', $usersyncsettings);
+        $realsyncoptions = ['create', 'update', 'suspend', 'reenable', 'disabledsyncsuspend', 'disabledsyncreenable',
+            'match', 'matchswitchauth', 'appassign', 'photosync', 'tzsync'];
+
+        return !empty(array_intersect($usersyncsettings, $realsyncoptions));
     }
 
     /**
@@ -114,6 +173,7 @@ class main {
         if (empty($token)) {
             throw new moodle_exception('errornotokenforusersync', 'local_o365');
         }
+
         return new unified($token, $this->httpclient);
     }
 
@@ -139,7 +199,8 @@ class main {
         if (PHPUNIT_TEST || defined('BEHAT_SITE_RUNNING')) {
             return null;
         }
-        $this->mtrace('Assigning Moodle user '.$muserid.' (objectid '.$userobjectid.') to application');
+
+        $this->mtrace('Assigning Moodle user ' . $muserid . ' (objectid ' . $userobjectid . ') to application');
 
         // Get object ID on first call.
         static $appobjectid = null;
@@ -148,6 +209,7 @@ class main {
             if (empty($appinfo)) {
                 return null;
             }
+
             $appobjectid = (unified::is_configured())
                 ? $appinfo['value'][0]['id']
                 : $appinfo['value'][0]['objectId'];
@@ -161,80 +223,86 @@ class main {
             if (!empty($result['odata.error']['code'])) {
                 $code = $result['odata.error']['code'];
             }
+
             if (!empty($result['odata.error']['message']['value'])) {
                 $error = $result['odata.error']['message']['value'];
             }
+
             $user = core_user::get_user($muserid);
-            $this->mtrace('Error assigning users "'.$user->username.'" Reason: '.$code.' '.$error);
+            $this->mtrace('Error assigning users "' . $user->username . '" Reason: ' . $code . ' ' . $error);
         } else {
             $this->mtrace('User assigned to application.');
         }
+
         return $result;
     }
 
     /**
-     * Assign photo to Moodle user account.
+     * Apply a pre-fetched photo to a user.
      *
-     * @param int $muserid
-     * @param bool $printtrace
-     * @return boolean True on photo updated.
+     * @param int $muserid The Moodle user ID
+     * @param mixed $photodata The photo data (binary string or false for no photo)
+     * @param bool $printtrace Whether to output trace messages
+     * @param int|null $appassignid Pre-fetched local_o365_appassign record ID, or null to look it up.
+     * @param int|null $currentpicture Pre-fetched user.picture value, or null to look it up.
+     * @param string|null $photohash Pre-fetched photo hash, or null to look it up.
+     * @return bool True if photo was updated, false otherwise
      */
-    public function assign_photo(int $muserid, bool $printtrace = false) {
+    protected function apply_photo(
+        int $muserid,
+        $photodata,
+        bool $printtrace = false,
+        ?int $appassignid = null,
+        ?int $currentpicture = null,
+        ?string $photohash = null
+    ) {
         global $DB, $CFG;
 
-        if ($printtrace) {
-            $this->mtrace('Syncing profile photo.');
-        }
         $result = false;
-        $apiclient = $this->construct_user_api();
-        $oidcusername = $DB->get_field('local_o365_objects', 'o365name', ['moodleid' => $muserid, 'type' => 'user']);
-        if (!$oidcusername) {
-            return false;
+
+        // Use the pre-fetched picture value from the batch query when available,
+        // avoiding a per-user DB round-trip just to read the picture field.
+        if ($currentpicture !== null) {
+            $muser = new stdClass();
+            $muser->id = $muserid;
+            $muser->picture = $currentpicture;
+        } else {
+            $muser = core_user::get_user($muserid, 'id, picture', MUST_EXIST);
         }
 
-        $muser = core_user::get_user($muserid, 'id, picture', MUST_EXIST);
-        $context = context_user::instance($muserid);
+        $context = user::instance($muserid);
 
-        try {
-            $image = $apiclient->get_photo($oidcusername);
-            if (!$image) {
-                // No profile photo found.
+        if (!$photodata || $photodata === false) {
+            // No profile photo found in M365.
+            if ($printtrace) {
+                $this->mtrace('No photo received.');
+            }
+
+            // Return true (state changed) only when there was an existing picture to clear.
+            // Returning false when the picture was already absent avoids spurious "changed" counts.
+            $result = !empty($muser->picture);
+
+            if ($result) {
+                // User had a photo; clear it now.
+                $fs = get_file_storage();
+                $fs->delete_area_files($context->id, 'user', 'icon');
+                $DB->set_field('user', 'picture', 0, ['id' => $muser->id]);
+
                 if ($printtrace) {
-                    $this->mtrace('No profile photo received.');
+                    $this->mtrace('Profile photo cleared.');
                 }
+            }
 
-                if (!empty($muser->picture)) {
-                    // User has no photo. Deleting previous profile photo.
-                    $fs = get_file_storage();
-                    $fs->delete_area_files($context->id, 'user', 'icon');
-                    $DB->set_field('user', 'picture', 0, ['id' => $muser->id]);
-                }
-                $result = false;
+            // Update appassign regardless of whether a picture existed, so that photoupdated
+            // reflects when M365 was last checked (enabling the expiry logic to skip future
+            // re-fetches) and any stale photohash is cleared to avoid false "unchanged" matches.
+            if ($appassignid !== null) {
+                $record = new stdClass();
+                $record->id = $appassignid;
+                $record->photoupdated = time();
+                $record->photohash = null;
+                $DB->update_record('local_o365_appassign', $record);
             } else {
-                if ($printtrace) {
-                    $this->mtrace('Profile photo received.');
-                }
-
-                // Check if json error message was returned.
-                if (!preg_match('/^{/', $image)) {
-                    // Update profile picture.
-                    $tempfile = tempnam($CFG->tempdir . '/', 'profileimage') . '.jpg';
-                    if (!$fp = fopen($tempfile, 'w+b')) {
-                        @unlink($tempfile);
-                        return false;
-                    }
-                    fwrite($fp, $image);
-                    fclose($fp);
-
-                    $newpicture = process_new_icon($context, 'user', 'icon', 0, $tempfile);
-                    if ($newpicture != $muser->picture) {
-                        $DB->set_field('user', 'picture', $newpicture, ['id' => $muser->id]);
-                        $result = true;
-                    }
-                    @unlink($tempfile);
-                }
-
-                // Update appassign record.
                 $record = $DB->get_record('local_o365_appassign', ['muserid' => $muserid]);
                 if (empty($record)) {
                     $record = new stdClass();
@@ -242,29 +310,282 @@ class main {
                     $record->assigned = 0;
                 }
                 $record->photoupdated = time();
+                $record->photohash = null;
                 if (empty($record->id)) {
                     $DB->insert_record('local_o365_appassign', $record);
                 } else {
                     $DB->update_record('local_o365_appassign', $record);
                 }
             }
+        } else if ($photohash !== null) {
+            // Photo hash provided: check if photo actually changed by comparing hashes.
+            $appassign = null;
+            if ($appassignid !== null) {
+                $appassign = $DB->get_record('local_o365_appassign', ['id' => $appassignid]);
+            } else {
+                $appassign = $DB->get_record('local_o365_appassign', ['muserid' => $muserid]);
+            }
+
+            // If the stored photo hash matches the new hash, photo hasn't changed.
+            if ($appassign && $appassign->photohash === $photohash) {
+                if ($printtrace) {
+                    $this->mtrace('Photo unchanged (same hash).');
+                }
+                $result = false;
+            } else {
+                // Hash is different or no previous hash stored: photo has changed.
+                // Process and store the new photo.
+                $result = $this->process_new_photo($muserid, $photodata, $printtrace, $muser, $context, $photohash, $appassignid);
+            }
+        } else {
+            // Both get_photo() and get_photos_batch() guarantee that $photodata is valid
+            // binary image data at this point (validated via is_valid_photo_binary() in
+            // unified.php), so no JSON-error guard is needed here.
+            $result = $this->process_new_photo($muserid, $photodata, $printtrace, $muser, $context, $photohash, $appassignid);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Process new photo data by storing it and updating user record.
+     *
+     * @param int $muserid The Moodle user ID
+     * @param string $photodata Binary photo data
+     * @param bool $printtrace Whether to output trace messages
+     * @param stdClass $muser User object with id and picture fields
+     * @param context_user $context User context
+     * @param string|null $photohash SHA256 hash of the photo data
+     * @param int|null $appassignid ID of the appassign record
+     * @return bool True if photo was updated, false otherwise
+     */
+    protected function process_new_photo(
+        int $muserid,
+        string $photodata,
+        bool $printtrace,
+        stdClass $muser,
+        $context,
+        ?string $photohash,
+        ?int $appassignid
+    ): bool {
+        global $DB, $CFG;
+
+        $tempfile = tempnam($CFG->tempdir . '/', 'profileimage') . '.jpg';
+        if (!$fp = fopen($tempfile, 'w+b')) {
+            @unlink($tempfile);
+            return false;
+        }
+
+        fwrite($fp, $photodata);
+        fclose($fp);
+
+        $newpicture = process_new_icon($context, 'user', 'icon', 0, $tempfile);
+        $iconprocessingfailed = ($newpicture === false);
+        $result = false;
+        if (!$iconprocessingfailed && $newpicture != $muser->picture) {
+            $DB->set_field('user', 'picture', $newpicture, ['id' => $muser->id]);
+            $result = true;
+        }
+
+        @unlink($tempfile);
+
+        if ($printtrace) {
+            if ($iconprocessingfailed) {
+                $this->mtrace('Photo processing failed.');
+            } else if ($result) {
+                $this->mtrace('Photo applied.');
+            } else {
+                $this->mtrace('Photo unchanged.');
+            }
+        }
+
+        // Update appassign record whenever an attempt was made, whether or not the photo actually
+        // changed in Moodle. This keeps photoupdated accurate (so the expiry logic in the sync task
+        // can skip re-fetching too often) and ensures a record always exists to reflect sync status,
+        // even when process_new_icon() fails to process the downloaded image (e.g. corrupt data or
+        // an unsupported format/size). The photohash is only stored on success. If it were stored
+        // after a failed attempt, a later run would see the hash still matches the (unchanged) M365
+        // photo and treat that as "already applied", permanently skipping retries for a photo that
+        // was never actually applied.
+        if ($appassignid !== null) {
+            $record = new stdClass();
+            $record->id = $appassignid;
+            $record->photoupdated = time();
+            if (!$iconprocessingfailed && $photohash !== null) {
+                $record->photohash = $photohash;
+            }
+            $DB->update_record('local_o365_appassign', $record);
+        } else {
+            $record = $DB->get_record('local_o365_appassign', ['muserid' => $muserid]);
+            if (empty($record)) {
+                $record = new stdClass();
+                $record->muserid = $muserid;
+                $record->assigned = 0;
+            }
+            $record->photoupdated = time();
+            if (!$iconprocessingfailed && $photohash !== null) {
+                $record->photohash = $photohash;
+            }
+            if (empty($record->id)) {
+                $DB->insert_record('local_o365_appassign', $record);
+            } else {
+                $DB->update_record('local_o365_appassign', $record);
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Assign a profile photo to a user.
+     * Fetches the photo from Microsoft Graph and applies it.
+     *
+     * @param int $muserid The Moodle user ID
+     * @param bool $printtrace Whether to output trace messages
+     * @return bool True if photo was updated, false otherwise
+     */
+    public function assign_photo(int $muserid, bool $printtrace = false) {
+        global $DB;
+
+        $result = false;
+        $apiclient = $this->construct_user_api();
+        $oidcusername = $DB->get_field('local_o365_objects', 'o365name', ['moodleid' => $muserid, 'type' => 'user']);
+        if (!$oidcusername) {
+            return false;
+        }
+
+        try {
+            $image = $apiclient->get_photo($oidcusername);
+            // Compute the hash the same way the batch photo sync does, so that the photohash is stored on login too.
+            $result = $this->apply_photo($muserid, $image, $printtrace, null, null, hash('sha256', $image));
         } catch (moodle_exception $e) {
             if ($e->getMessage() === get_string('erroro365nophoto', 'local_o365')) {
+                // User has no photo - apply false to handle cleanup.
+                $result = $this->apply_photo($muserid, false, false);
                 if ($printtrace) {
-                    $this->mtrace('No profile photo received.');
-                }
-
-                // User has no photo - if the user has an existing photo in Moodle profile, delete it.
-                if (!empty($muser->picture)) {
-                    // User has no photo. Deleting previous profile photo.
-                    $fs = get_file_storage();
-                    $fs->delete_area_files($context->id, 'user', 'icon');
-                    $DB->set_field('user', 'picture', 0, ['id' => $muser->id]);
+                    $this->mtrace('No photo received.');
                 }
             }
         }
 
         return $result;
+    }
+
+    /**
+     * Apply a pre-fetched timezone to a Moodle user.
+     *
+     * @param int $muserid
+     * @param array $remotetimezone Timezone data from Graph API
+     * @param bool $printtrace
+     * @param string|null $currenttimezone Pre-fetched user.timezone value for early-exit comparison.
+     * @return array Array with keys 'changed' (bool) and 'timezone' (string IANA name, empty if invalid).
+     */
+    protected function apply_timezone(
+        int $muserid,
+        array $remotetimezone,
+        bool $printtrace = false,
+        ?string $currenttimezone = null
+    ): array {
+        if (!is_array($remotetimezone) || empty($remotetimezone['value'])) {
+            if ($printtrace) {
+                $this->mtrace('No timezone received.');
+            }
+            return ['changed' => false, 'timezone' => ''];
+        }
+
+        $remotetimezonesetting = $remotetimezone['value'];
+        $moodletimezone = \core_date::normalise_timezone($remotetimezonesetting);
+
+        $etcgmttimezonemappings = [
+            'Etc/GMT+12' => 'Pacific/Fiji',
+            'Etc/GMT+11' => 'Pacific/Pago_Pago',
+            'Etc/GMT+10' => 'Pacific/Honolulu',
+            'Etc/GMT+9' => 'America/Anchorage',
+            'Etc/GMT+8' => 'America/Los_Angeles',
+            'Etc/GMT+7' => 'America/Denver',
+            'Etc/GMT+6' => 'America/Chicago',
+            'Etc/GMT+5' => 'America/New_York',
+            'Etc/GMT+4' => 'America/Antigua',
+            'Etc/GMT+3' => 'America/Buenos_Aires',
+            'Etc/GMT+2' => 'Atlantic/Noronha',
+            'Etc/GMT+1' => 'Atlantic/Cape_Verde',
+            'Etc/GMT' => 'Europe/London',
+            'Etc/GMT-1' => 'Europe/Paris',
+            'Etc/GMT-2' => 'Europe/Helsinki',
+            'Etc/GMT-3' => 'Asia/Qatar',
+            'Etc/GMT-4' => 'Asia/Baku',
+            'Etc/GMT-5' => 'Asia/Karachi',
+            'Etc/GMT-6' => 'Asia/Dhaka',
+            'Etc/GMT-7' => 'Asia/Bangkok',
+            'Etc/GMT-8' => 'Asia/Hong_Kong',
+            'Etc/GMT-9' => 'Asia/Tokyo',
+            'Etc/GMT-10' => 'Pacific/Guam',
+            'Etc/GMT-11' => 'Asia/Sakhalin',
+            'Etc/GMT-12' => 'Pacific/Auckland',
+            'Etc/GMT-13' => 'Pacific/Tongatapu',
+            'Etc/GMT-14' => 'Pacific/Kiritimati',
+        ];
+        if (isset($etcgmttimezonemappings[$moodletimezone])) {
+            $moodletimezone = $etcgmttimezonemappings[$moodletimezone];
+        }
+
+        $moodletimezone = clean_param($moodletimezone, PARAM_TIMEZONE);
+
+        if (!$moodletimezone) {
+            return ['changed' => false, 'timezone' => ''];
+        }
+
+        // When the caller provides the current timezone (e.g. from the batch query),
+        // we can short-circuit here and skip fetching the full user record.
+        if ($currenttimezone !== null && $moodletimezone === $currenttimezone) {
+            return ['changed' => false, 'timezone' => $moodletimezone];
+        }
+
+        $existinguser = core_user::get_user($muserid);
+        $existinguser->timezone = $moodletimezone;
+        user_update_user($existinguser, false, true);
+
+        if ($printtrace) {
+            $this->mtrace('Timezone applied.');
+        }
+
+        return ['changed' => true, 'timezone' => $moodletimezone];
+    }
+
+    /**
+     * Public wrapper to apply photo to a user (for use by photosync task).
+     *
+     * @param int $muserid The Moodle user ID
+     * @param mixed $photodata The photo data (binary string or false for no photo)
+     * @param int|null $appassignid Pre-fetched local_o365_appassign record ID, or null to look it up.
+     * @param int|null $currentpicture Pre-fetched user.picture value, or null to look it up.
+     * @param string|null $photohash Pre-fetched photo hash, or null to look it up.
+     * @return bool True if photo was updated, false otherwise
+     */
+    public function apply_photo_public(
+        int $muserid,
+        $photodata,
+        ?int $appassignid = null,
+        ?int $currentpicture = null,
+        ?string $photohash = null
+    ): bool {
+        return $this->apply_photo($muserid, $photodata, false, $appassignid, $currentpicture, $photohash);
+    }
+
+    /**
+     * Public wrapper to apply timezone to a user (for use by photosync task).
+     *
+     * @param int $muserid The Moodle user ID
+     * @param array $remotetimezone The timezone data from Microsoft Graph
+     * @param string|null $currenttimezone Pre-fetched user.timezone value for early-exit comparison.
+     * @return array Array with 'changed' (bool) and 'timezone' (string) keys.
+     */
+    public function apply_timezone_public(
+        int $muserid,
+        array $remotetimezone,
+        ?string $currenttimezone = null
+    ): array {
+        return $this->apply_timezone($muserid, $remotetimezone, false, $currenttimezone);
     }
 
     /**
@@ -276,64 +597,24 @@ class main {
     public function sync_timezone(int $muserid, bool $printtrace = false) {
         global $DB;
 
-        if ($printtrace) {
-            $this->mtrace('Syncing timezone');
-        }
-
         $tokenresource = unified::get_tokenresource();
         $token = utils::get_application_token($tokenresource, $this->clientdata, $this->httpclient);
         if (empty($token)) {
             throw new moodle_exception('errornotokenforusersync', 'local_o365');
         }
+
         $apiclient = new unified($token, $this->httpclient);
         $oidcusername = $DB->get_field('local_o365_objects', 'o365name', ['moodleid' => $muserid, 'type' => 'user']);
         if (!$oidcusername) {
             return false;
         }
+
         $remotetimezone = $apiclient->get_timezone($oidcusername);
-        if (is_array($remotetimezone) && !empty($remotetimezone['value'])) {
-            $remotetimezonesetting = $remotetimezone['value'];
-            $moodletimezone = \core_date::normalise_timezone($remotetimezonesetting);
-
-            $etcgmttimezonemappings = [
-                'Etc/GMT+12' => 'Pacific/Fiji',
-                'Etc/GMT+11' => 'Pacific/Pago_Pago',
-                'Etc/GMT+10' => 'Pacific/Honolulu',
-                'Etc/GMT+9' => 'America/Anchorage',
-                'Etc/GMT+8' => 'America/Los_Angeles',
-                'Etc/GMT+7' => 'America/Denver',
-                'Etc/GMT+6' => 'America/Chicago',
-                'Etc/GMT+5' => 'America/New_York',
-                'Etc/GMT+4' => 'America/Antigua',
-                'Etc/GMT+3' => 'America/Buenos_Aires',
-                'Etc/GMT+2' => 'Atlantic/Noronha',
-                'Etc/GMT+1' => 'Atlantic/Cape_Verde',
-                'Etc/GMT' => 'Europe/London',
-                'Etc/GMT-1' => 'Europe/Paris',
-                'Etc/GMT-2' => 'Europe/Helsinki',
-                'Etc/GMT-3' => 'Asia/Qatar',
-                'Etc/GMT-4' => 'Asia/Baku',
-                'Etc/GMT-5' => 'Asia/Karachi',
-                'Etc/GMT-6' => 'Asia/Dhaka',
-                'Etc/GMT-7' => 'Asia/Bangkok',
-                'Etc/GMT-8' => 'Asia/Hong_Kong',
-                'Etc/GMT-9' => 'Asia/Tokyo',
-                'Etc/GMT-10' => 'Pacific/Guam',
-                'Etc/GMT-11' => 'Asia/Sakhalin',
-                'Etc/GMT-12' => 'Pacific/Auckland',
-                'Etc/GMT-13' => 'Pacific/Tongatapu',
-                'Etc/GMT-14' => 'Pacific/Kiritimati',
-            ];
-            if (isset($etcgmttimezonemappings[$moodletimezone])) {
-                $moodletimezone = $etcgmttimezonemappings[$moodletimezone];
-            }
-
-            $moodletimezone = clean_param($moodletimezone, PARAM_TIMEZONE);
-
-            if ($moodletimezone) {
-                $existinguser = core_user::get_user($muserid);
-                $existinguser->timezone = $moodletimezone;
-                user_update_user($existinguser, false, true);
+        if (is_array($remotetimezone)) {
+            $this->apply_timezone($muserid, $remotetimezone, $printtrace);
+        } else {
+            if ($printtrace) {
+                $this->mtrace('No timezone received.');
             }
         }
     }
@@ -354,6 +635,7 @@ class main {
                 return $output[$param];
             }
         }
+
         return null;
     }
 
@@ -371,38 +653,107 @@ class main {
         if (!empty($result) && is_array($result)) {
             return $result;
         }
+
         return [];
     }
 
     /**
-     * Get all users in the configured directory.
+     * Process users in batches with a callback function.
+     * This method retrieves 500 users per API call and processes them immediately,
+     * reducing memory usage by not loading all users into memory at once.
      *
-     * @param string|array $params Requested user parameters.
-     * @return array Array of user information.
+     * @param callable $callback Function to call for each batch of users. Receives array of users as parameter.
+     * @param string|array $params User fields to select (use 'default' for default fields)
+     * @return int Total number of users processed
+     * @throws moodle_exception
      */
-    public function get_users($params = 'default') {
+    public function process_users_batched(callable $callback, $params = 'default'): int {
         $apiclient = $this->construct_user_api();
-        $users = $apiclient->get_users($params);
 
-        return $users;
+        $groupfilter = $this->get_usersync_group_filter();
+        if (!empty($groupfilter)) {
+            $totalprocessed = $apiclient->process_group_members_batched($groupfilter, $callback, $params);
+        } else {
+            $totalprocessed = $apiclient->process_users_batched($callback, $params);
+        }
+
+        $this->warn_about_dropped_custom_claim_fields($apiclient);
+
+        return $totalprocessed;
     }
 
     /**
-     * Return the users search delta, along with skip token and delta tokens.
+     * Process users delta in batches with a callback function.
+     * This method retrieves 500 users per API call and processes them immediately,
+     * reducing memory usage by not loading all users into memory at once.
      *
-     * @param string $params
-     * @param null $deltatoken
-     * @return array
+     * @param callable $callback Function to call for each batch of users. Receives array of users as parameter.
+     * @param string|array $params User fields to select (use 'default' for default fields)
+     * @param string|null $deltatoken Delta token from previous sync
+     * @return array [total number of users processed, new delta token, bool fields mapping changed]
      * @throws moodle_exception
      */
-    public function get_users_delta($params = 'default', $deltatoken = null) {
-        $tokenresource = unified::get_tokenresource();
-        $token = utils::get_application_token($tokenresource, $this->clientdata, $this->httpclient);
-        if (empty($token)) {
-            throw new moodle_exception('errornotokenforusersync', 'local_o365');
+    public function process_users_delta_batched(callable $callback, $params = 'default', ?string $deltatoken = null): array {
+        $apiclient = $this->construct_user_api();
+
+        $groupfilter = $this->get_usersync_group_filter();
+        if (!empty($groupfilter)) {
+            $result = $apiclient->process_group_members_delta_batched($groupfilter, $callback, $params, $deltatoken);
+        } else {
+            $result = $apiclient->process_users_delta_batched($callback, $params, $deltatoken);
         }
-        $apiclient = new unified($token, $this->httpclient);
-        return $apiclient->get_users_delta($params, $deltatoken);
+
+        $this->warn_about_dropped_custom_claim_fields($apiclient);
+
+        return $result;
+    }
+
+    /**
+     * Log a warning naming any configured custom claim fields that were requested from Microsoft
+     * Graph during the last batched user query but never returned for any user — how Graph
+     * typically responds to a $select property it does not recognise, rather than an API error.
+     *
+     * Custom claims are read from the identity provider's tokens at login. Since the sync task has
+     * no user token to read from, a custom claim can only be synced this way when its name also
+     * happens to be a selectable Graph user property (for example a directory extension attribute).
+     *
+     * @param unified $apiclient
+     * @return void
+     */
+    protected function warn_about_dropped_custom_claim_fields(unified $apiclient): void {
+        $droppedfields = $apiclient->get_and_clear_dropped_custom_claim_fields();
+        if (empty($droppedfields)) {
+            return;
+        }
+
+        self::mtrace(
+            'Warning: custom claim field(s) "' . implode(', ', $droppedfields) . '" could not be retrieved from ' .
+            'Microsoft Graph during user sync (not a valid Graph user property) and were skipped for this run. ' .
+            'Custom claims are only synced during user sync when they also correspond to a selectable Graph ' .
+            'property, such as a directory extension attribute.'
+        );
+    }
+
+    /**
+     * Process users in batches with minimal fields (id and accountEnabled only).
+     * This method is optimized for suspend/reenable operations that only need user IDs.
+     *
+     * NOTE: This method intentionally does NOT apply the usersyncgroupfilter setting.
+     * Enabled-status sync (suspend/reenable/delete) operates across all Entra users so
+     * that accounts disabled or deleted in Microsoft 365 are always suspended in Moodle,
+     * even when the user was never in the configured sync group. This is a deliberate
+     * safety-net behaviour and is documented in the settings_usersyncgroupfilter_details
+     * language string. If you need group-filtered status checks, call
+     * process_users_batched() with the appropriate callback instead.
+     *
+     * @param callable $callback Function to call for each batch of users. Receives array of users as parameter.
+     * @param array $extraselect Additional Graph user resource fields to include in the query's $select.
+     * @return int Total number of users processed
+     * @throws moodle_exception
+     */
+    public function process_users_minimal_batched(callable $callback, array $extraselect = []): int {
+        $apiclient = $this->construct_user_api();
+        return $apiclient->process_users_minimal_batched($callback, $extraselect);
     }
 
     /**
@@ -456,6 +807,7 @@ class main {
         foreach ($userteams as $userteam) {
             $teamnames[] = $userteam['displayName'];
         }
+
         return join(',', $teamnames);
     }
 
@@ -502,7 +854,7 @@ class main {
      *
      * @param array $entraiduserdata User data from Microsoft Entra ID.
      * @param stdClass $user Moodle user data.
-     * @param string $eventtype 'login', or 'create'
+     * @param string $eventtype 'login', 'create' or 'usersync'
      *
      * @return stdClass Modified Moodle user data.
      */
@@ -570,6 +922,31 @@ class main {
             $userobjectid = $entraiduserdata['userPrincipalName'];
         }
 
+        if (empty($entraiduserdata['mail'])) {
+            $upn = $entraiduserdata['userPrincipalName'] ?? null;
+            $fallbackemail = auth_oidc_upn_as_email($upn);
+            if (!empty($fallbackemail)) {
+                $entraiduserdata['mail'] = $fallbackemail;
+            } else {
+                $dummyemail = auth_oidc_generate_dummy_email($upn, $userobjectid);
+                if (!empty($dummyemail)) {
+                    $entraiduserdata['mail'] = $dummyemail;
+                    $message = 'No email address was received from Microsoft for user "' . ($upn ?? '') . '"; using ' .
+                        'generated placeholder email address "' . $dummyemail . '" instead.';
+                    if (CLI_SCRIPT) {
+                        // This function also runs during interactive OIDC login, where mtrace() would echo
+                        // straight into the page response, so only trace here when running as a CLI task.
+                        static::mtrace($message);
+                    }
+                    \auth_oidc\utils::debug(
+                        $message,
+                        'local_o365\feature\usersync\main::apply_configured_fieldmap',
+                        ['userPrincipalName' => $upn, 'objectId' => $userobjectid]
+                    );
+                }
+            }
+        }
+
         $usersync = new self();
 
         $countrymapping = get_string_manager()->get_list_of_countries();
@@ -584,7 +961,7 @@ class main {
             $remotefield = $fieldmapping['field_map'];
             $behavior = $fieldmapping['update_local'];
 
-            if ($behavior !== 'on' . $eventtype && $behavior !== 'always') {
+            if (!auth_oidc_fieldmap_applies_to_event($behavior, $eventtype)) {
                 // Field mapping doesn't apply to this event type.
                 continue;
             }
@@ -593,30 +970,43 @@ class main {
                 $remotefield = $objectidfieldname;
             }
 
-            if (isset($entraiduserdata[$remotefield])) {
+            // Use array_key_exists() rather than isset() so that a field explicitly cleared in
+            // Microsoft Entra ID (returned as null by Graph, since it was included in $select)
+            // is applied as an empty value instead of being skipped, which previously left the
+            // stale Moodle value in place. See MDL bug report / GitHub issue #2281.
+            if (array_key_exists($remotefield, $entraiduserdata)) {
                 switch ($remotefield) {
                     case 'country':
                         // Update country with two-letter country code.
-                        $incoming = strtoupper($entraiduserdata[$remotefield]);
-                        if (isset($countrymapping[$incoming])) {
-                            $countrycode = $incoming;
-                        } else {
-                            $incoming = strtolower($incoming);
-                            foreach ($countrymapping as $code => $country) {
-                                if (stripos($country, $incoming) !== false ||
-                                    stripos($incoming, $country) !== false) {
-                                    $countrycode = $code;
-                                    break;
+                        $incoming = strtoupper((string) $entraiduserdata[$remotefield]);
+                        $countrycode = '';
+                        if ($incoming !== '') {
+                            if (isset($countrymapping[$incoming])) {
+                                $countrycode = $incoming;
+                            } else {
+                                $incominglower = strtolower($incoming);
+                                foreach ($countrymapping as $code => $country) {
+                                    if (
+                                        stripos($country, $incominglower) !== false ||
+                                        stripos($incominglower, $country) !== false
+                                    ) {
+                                        $countrycode = $code;
+                                        break;
+                                    }
                                 }
                             }
                         }
+
                         $user->$localfield = (!empty($countrycode)) ? $countrycode : '';
                         break;
                     case 'businessPhones':
-                        $user->$localfield = implode(', ', $entraiduserdata[$remotefield]);
+                        $user->$localfield = implode(', ', (array) $entraiduserdata[$remotefield]);
+                        break;
+                    case 'accountEnabled':
+                        $user->$localfield = $entraiduserdata[$remotefield] ? '1' : '0';
                         break;
                     default:
-                        $user->$localfield = $entraiduserdata[$remotefield];
+                        $user->$localfield = $entraiduserdata[$remotefield] ?? '';
                 }
             }
 
@@ -648,18 +1038,35 @@ class main {
                         if (substr($remotefield, 0, 18) == 'extensionAttribute') {
                             $extensionattributeid = substr($remotefield, 18);
                             if (ctype_digit($extensionattributeid) && $extensionattributeid >= 1 && $extensionattributeid <= 15) {
-                                if (isset($entraiduserdata['onPremisesExtensionAttributes']) &&
-                                    isset($entraiduserdata['onPremisesExtensionAttributes'][$remotefield])) {
-                                    $user->$localfield = $entraiduserdata['onPremisesExtensionAttributes'][$remotefield];
+                                // Use array_key_exists() rather than isset() so that an extension
+                                // attribute cleared in Microsoft Entra ID (returned as null by
+                                // Graph) is applied as an empty value instead of being skipped.
+                                // Guard with is_array() first: onPremisesExtensionAttributes itself
+                                // can be present but null (e.g. cloud-only users), and passing null
+                                // as the array_key_exists() haystack throws a TypeError in PHP 8.
+                                if (
+                                    array_key_exists('onPremisesExtensionAttributes', $entraiduserdata) &&
+                                    is_array($entraiduserdata['onPremisesExtensionAttributes']) &&
+                                    array_key_exists($remotefield, $entraiduserdata['onPremisesExtensionAttributes'])
+                                ) {
+                                    $user->$localfield = $entraiduserdata['onPremisesExtensionAttributes'][$remotefield] ?? '';
                                 }
                             }
                         }
                 }
             }
+
+            if (isset($user->$localfield)) {
+                // Trim the value to fit the local field's database column, if applicable, to avoid database write errors.
+                $user->$localfield = auth_oidc_trim_user_field_value($localfield, $user->$localfield);
+            }
         }
 
         // Validate language sync.
-        if (array_key_exists('lang', $fieldmappings) && ($behavior === 'on' . $eventtype || $behavior === 'always')) {
+        if (
+            array_key_exists('lang', $fieldmappings) &&
+            auth_oidc_fieldmap_applies_to_event($fieldmappings['lang']['update_local'], $eventtype)
+        ) {
             if (!get_string_manager()->translation_exists($originallangsetting, false)) {
                 $originallangsetting = $CFG->lang;
             }
@@ -668,7 +1075,7 @@ class main {
                 // If the user's new language setting is empty, use original setting.
                 $user->lang = $originallangsetting;
             } else {
-                $newlangsetting = strtolower(str_replace('-', '_' , $user->lang));
+                $newlangsetting = strtolower(str_replace('-', '_', $user->lang));
                 $newlangsettingwp = $newlangsetting . '_wp';
                 $newlangsettingsimple = substr($newlangsetting, 0, 2);
 
@@ -736,7 +1143,7 @@ class main {
             foreach ($fieldmappings as $fieldmapping) {
                 $remotefield = $fieldmapping['field_map'];
                 if (!in_array($remotefield, $idtokenfields)) {
-                    if ($fieldmapping['update_local'] == 'always' || $fieldmapping['update_local'] == 'on' . $eventtype) {
+                    if (auth_oidc_fieldmap_applies_to_event($fieldmapping['update_local'], $eventtype)) {
                         return true;
                     }
                 }
@@ -757,13 +1164,16 @@ class main {
         if (empty($restriction)) {
             return true;
         }
+
         $restriction = @unserialize($restriction);
         if (empty($restriction) || !is_array($restriction)) {
             return true;
         }
+
         if (empty($restriction['remotefield']) || empty($restriction['value'])) {
             return true;
         }
+
         $useregex = (!empty($restriction['useregex'])) ? true : false;
 
         if ($restriction['remotefield'] === 'o365group') {
@@ -782,6 +1192,7 @@ class main {
 
                     return false;
                 }
+
                 $usergroups = $apiclient->get_user_transitive_groups($entraiduserdata['id']);
 
                 foreach ($usergroups as $usergroup) {
@@ -806,31 +1217,39 @@ class main {
             $apiclient = $this->construct_user_api();
 
             try {
-                $group = $apiclient->get_group($restriction['value']);
-                if (empty($group) || !isset($group['id'])) {
-                    utils::debug('Could not find group (1)', __METHOD__, $group);
-
+                // Support one group ID (legacy behavior) or a comma-separated list.
+                $groupids = array_values(array_filter(array_map('trim', explode(',', $restriction['value']))));
+                if (empty($groupids)) {
                     return false;
                 }
-                $usergroups = $apiclient->get_user_transitive_groups($entraiduserdata['id']);
 
-                foreach ($usergroups as $usergroup) {
-                    if ($group['id'] === $usergroup) {
+                // Object IDs are case-insensitive GUIDs. Normalize both sides before comparison.
+                $groupids = array_map('strtolower', $groupids);
+                $usergroups = $apiclient->get_user_transitive_groups($entraiduserdata['id']);
+                if (empty($usergroups)) {
+                    return false;
+                }
+                $usergroups = array_flip(array_map('strtolower', $usergroups));
+
+                foreach ($groupids as $groupid) {
+                    if (isset($usergroups[$groupid])) {
                         return true;
                     }
                 }
 
                 return false;
             } catch (moodle_exception $e) {
-                utils::debug('Could not find group (2)', __METHOD__, $e);
+                utils::debug('Could not check group membership', __METHOD__, $e);
 
                 return false;
             }
         } else if (substr($restriction['remotefield'], 0, 18) == 'extensionAttribute') {
             $extensionattributeid = substr($restriction['remotefield'], 18);
             if (ctype_digit($extensionattributeid) && $extensionattributeid >= 1 && $extensionattributeid <= 15) {
-                if (isset($entraiduserdata['onPremisesExtensionAttributes']) &&
-                    isset($entraiduserdata['onPremisesExtensionAttributes'][$restriction['remotefield']])) {
+                if (
+                    isset($entraiduserdata['onPremisesExtensionAttributes']) &&
+                    isset($entraiduserdata['onPremisesExtensionAttributes'][$restriction['remotefield']])
+                ) {
                     $fieldval = $entraiduserdata['onPremisesExtensionAttributes'][$restriction['remotefield']];
                     $restrictionval = $restriction['value'];
 
@@ -855,6 +1274,7 @@ class main {
             if (!isset($entraiduserdata[$restriction['remotefield']])) {
                 return false;
             }
+
             $fieldval = $entraiduserdata[$restriction['remotefield']];
             $restrictionval = $restriction['value'];
 
@@ -869,6 +1289,7 @@ class main {
                 }
             }
         }
+
         return false;
     }
 
@@ -893,6 +1314,7 @@ class main {
         if (isset($entraiduserdata['convertedidentifier']) && $entraiduserdata['convertedidentifier']) {
             $username = $entraiduserdata['convertedidentifier'];
         }
+
         $newuser = (object)[
             'auth' => 'oidc',
             'username' => trim(core_text::strtolower($username)),
@@ -902,7 +1324,7 @@ class main {
         ];
 
         // Determine if the newly created user needs to be suspended.
-        if (isset($syncoptions['disabledsync'])) {
+        if (isset($syncoptions['disabledsyncsuspend'])) {
             if (isset($entraiduserdata['accountEnabled']) && $entraiduserdata['accountEnabled'] == false) {
                 $newuser->suspended = 1;
             }
@@ -935,6 +1357,7 @@ class main {
             } else {
                 $userobjectid = $entraiduserdata['objectId'];
             }
+
             $now = time();
             $userobjectdata = (object)[
                 'type' => 'user',
@@ -964,7 +1387,7 @@ class main {
      * @return bool An boolean indicating that was created Moodle user.
      */
     public function update_user_from_entra_id_data($entraiduserdata, $fullexistinguser) {
-        $existinguser = static::apply_configured_fieldmap($entraiduserdata, $fullexistinguser, 'login');
+        $existinguser = static::apply_configured_fieldmap($entraiduserdata, $fullexistinguser, 'usersync');
 
         if (!empty($existinguser->email)) {
             if (email_is_not_allowed($existinguser->email)) {
@@ -996,7 +1419,7 @@ class main {
      */
     public static function mtrace(string $msg) {
         if (!PHPUNIT_TEST && !defined('BEHAT_SITE_RUNNING')) {
-            mtrace('......... ' . $msg);
+            utils::mtrace($msg, 3);
         }
     }
 
@@ -1023,9 +1446,38 @@ class main {
     }
 
     /**
+     * Get the Microsoft Graph user resource field whose value is stored as the Moodle username, based on the configured
+     * auth_oidc binding username claim.
+     *
+     * Only returns a field when the Moodle username can be matched reliably against a single Graph user attribute, i.e.
+     * when the admin has explicitly selected one of upn, oid, email or samaccountname. Returns null for:
+     *  - "auto" - the effective claim is decided per token at login time and can differ between users;
+     *  - sub, unique_name, preferred_username - not Graph user resource fields;
+     *  - a custom claim name.
+     * In those cases the Moodle username cannot be resolved back to a single Entra ID account.
+     *
+     * @return string|null The Graph field name, or null if the binding claim cannot be mapped to one.
+     */
+    public static function get_binding_graph_field(): ?string {
+        $claim = auth_oidc_get_binding_username_claim();
+        switch ($claim) {
+            case 'upn':
+                return 'userPrincipalName';
+            case 'oid':
+                return 'id';
+            case 'email':
+                return 'mail';
+            case 'samaccountname':
+                return 'onPremisesSamAccountName';
+            default:
+                return null;
+        }
+    }
+
+    /**
      * Sync Moodle users with the configured Microsoft Entra ID users.
      *
-     * @param array $entraidusers Array of Microsoft Entra ID users from $this->get_users().
+     * @param array $entraidusers Array of Microsoft Entra ID users.
      * @param string $bindingusernameclaim
      * @return bool Success/Failure
      */
@@ -1034,8 +1486,14 @@ class main {
 
         $usersyncsettings = $this->get_sync_options();
         $switchauthminupnsplit0 = get_config('local_o365', 'switchauthminupnsplit0');
-        if (empty($switchauthminupnsplit0)) {
+        if ($switchauthminupnsplit0 === false || $switchauthminupnsplit0 === '' || !is_numeric($switchauthminupnsplit0)) {
+            // Not configured, or a legacy non-numeric value saved before this setting used PARAM_INT; fall back to
+            // the default.
             $switchauthminupnsplit0 = 10;
+        } else {
+            // A configured value of 0 is left as-is so admins can deliberately disable the minimum length
+            // protection. Negative values are clamped to 0.
+            $switchauthminupnsplit0 = max(0, (int) $switchauthminupnsplit0);
         }
 
         $usernames = [];
@@ -1046,13 +1504,23 @@ class main {
         foreach ($entraidusers as $i => $user) {
             if (!isset($user[$bindingusernameclaim])) {
                 // User doesn't have the binding username claim, should be deleted users.
+                $userobjectid = $user['id'] ?? ($user['objectId'] ?? 'unknown');
+                $this->mtrace('Microsoft Entra ID user missing binding username claim "' . $bindingusernameclaim . '" (' .
+                    $userobjectid . '); skipping...');
                 unset($entraidusers[$i]);
                 continue;
             }
 
             if (!$guestsync || $bindingusernameclaim != 'userPrincipalName') {
                 if (strpos($user['userPrincipalName'], '#EXT#') !== false) {
-                    // The user is a guest user, and the guest sync option is disabled. Skip processing the user.
+                    // The user is a guest user, and either guest sync is disabled, or the configured binding
+                    // username claim is not userPrincipalName (guest users can only be matched by UPN). Skip
+                    // processing the user.
+                    $skipreason = (!$guestsync)
+                        ? 'guest sync is disabled'
+                        : 'the binding username claim is not userPrincipalName';
+                    $this->mtrace('Microsoft Entra ID guest user ' . $user['userPrincipalName'] .
+                        ' received, but ' . $skipreason . '; skipping...');
                     unset($entraidusers[$i]);
                     continue;
                 }
@@ -1086,7 +1554,6 @@ class main {
                     }
                 }
             }
-
         }
 
         if (!$entraidusers) {
@@ -1102,8 +1569,10 @@ class main {
                      conn.id as existingconnectionid,
                      assign.assigned assigned,
                      assign.photoid photoid,
+                     assign.photohash photohash,
                      assign.photoupdated photoupdated,
-                     obj.id AS objectid
+                     obj.id AS objectid,
+                     obj.objectid AS o365objectid
                 FROM {user} u
            LEFT JOIN {auth_oidc_token} tok ON tok.userid = u.id
            LEFT JOIN {local_o365_connections} conn ON conn.muserid = u.id
@@ -1116,7 +1585,16 @@ class main {
         if (isset($usersyncsettings['emailsync'])) {
             $select = "SELECT LOWER(u.email) AS email, LOWER(u.username) AS username, ";
 
-            $duplicateemailaddresses = local_o365_get_duplicate_emails();
+            // Use cached duplicate emails if available, otherwise fetch fresh.
+            if (isset($this->synccache) && $this->synccache->duplicateemailaddresses !== null) {
+                $duplicateemailaddresses = $this->synccache->duplicateemailaddresses;
+            } else {
+                $duplicateemailaddresses = local_o365_get_duplicate_emails();
+                // Cache for subsequent batches if cache is available.
+                if (isset($this->synccache)) {
+                    $this->synccache->duplicateemailaddresses = $duplicateemailaddresses;
+                }
+            }
             if ($duplicateemailaddresses) {
                 // Match by email, but duplicate email exists, revert to match by username.
                 $fallbackselect = "SELECT LOWER(u.username) AS username, LOWER(u.email) AS email, ";
@@ -1131,8 +1609,12 @@ class main {
         }
 
         if ($fallbackusers) {
-            [$duplicateemailsql, $duplicateemailparams] = $DB->get_in_or_equal($duplicateemailaddresses, SQL_PARAMS_QM, 'param',
-                false);
+            [$duplicateemailsql, $duplicateemailparams] = $DB->get_in_or_equal(
+                $duplicateemailaddresses,
+                SQL_PARAMS_QM,
+                'param',
+                false
+            );
             $sql = $select . $basesql . " AND LOWER(u.email) {$duplicateemailsql} " . $orderbysql;
             $params = array_merge(['user'], [$CFG->mnet_localhost_id, '0'], $duplicateemailparams);
         } else {
@@ -1168,8 +1650,10 @@ class main {
                        conn.id as existingconnectionid,
                        assign.assigned assigned,
                        assign.photoid photoid,
+                       assign.photohash photohash,
                        assign.photoupdated photoupdated,
-                       obj.id AS objectid
+                       obj.id AS objectid,
+                       obj.objectid AS o365objectid
                   FROM {user} u
              LEFT JOIN {auth_oidc_token} tok ON tok.userid = u.id
              LEFT JOIN {local_o365_connections} conn ON conn.muserid = u.id
@@ -1183,11 +1667,93 @@ class main {
             $existingusers = $existingusers + $linkedexistingusers;
         }
 
+        // Pre-fetch all data needed for user sync to avoid N+1 query problems.
+        $entraiduserids = [];
+        $moodleuserids = [];
+        foreach ($entraidusers as $entraiduser) {
+            if (unified::is_configured()) {
+                $entraiduserids[] = $entraiduser['id'];
+            } else {
+                $entraiduserids[] = $entraiduser['objectId'];
+            }
+        }
+        foreach ($existingusers as $existinguser) {
+            if (isset($existinguser->muserid)) {
+                $moodleuserids[] = $existinguser->muserid;
+            }
+        }
+
+        // Bulk fetch local_o365_objects records by objectid.
+        $this->o365objectsbyobjectid = [];
+        $this->o365objectsbymoodleid = [];
+        if ($entraiduserids) {
+            [$objectidsql, $objectidparams] = $DB->get_in_or_equal($entraiduserids);
+            $o365objects = $DB->get_records_select(
+                'local_o365_objects',
+                "type = ? AND objectid $objectidsql",
+                array_merge(['user'], $objectidparams)
+            );
+            foreach ($o365objects as $o365object) {
+                $this->o365objectsbyobjectid[$o365object->objectid] = $o365object;
+                $this->o365objectsbymoodleid[$o365object->moodleid] = $o365object;
+                // Include users known by object ID even if their username no longer matches (e.g. after a UPN rename).
+                if (!in_array($o365object->moodleid, $moodleuserids)) {
+                    $moodleuserids[] = $o365object->moodleid;
+                }
+            }
+        }
+
+        // Bulk fetch local_o365_connections records.
+        $this->connectionsbymoodleid = [];
+        $this->connectionsbyentraidupn = [];
+        if ($moodleuserids) {
+            [$museridssql, $museridsparams] = $DB->get_in_or_equal($moodleuserids);
+            $connections = $DB->get_records_select('local_o365_connections', "muserid $museridssql", $museridsparams);
+            foreach ($connections as $connection) {
+                $this->connectionsbymoodleid[$connection->muserid] = $connection;
+            }
+        }
+        if ($useridentifiers) {
+            [$entraidupnsql, $entraidupnparams] = $DB->get_in_or_equal($useridentifiers);
+            $connectionsbyupn = $DB->get_records_select('local_o365_connections', "entraidupn $entraidupnsql", $entraidupnparams);
+            foreach ($connectionsbyupn as $connection) {
+                $this->connectionsbyentraidupn[$connection->entraidupn] = $connection;
+            }
+        }
+
+        // Bulk fetch auth_oidc_token records.
+        // Store all tokens per user (may be multiple) to avoid N+1 queries later.
+        $this->tokensbymoodleid = [];
+        if ($moodleuserids) {
+            [$museridssql, $museridsparams] = $DB->get_in_or_equal($moodleuserids);
+            $tokens = $DB->get_records_select('auth_oidc_token', "userid $museridssql", $museridsparams);
+            foreach ($tokens as $token) {
+                if (!isset($this->tokensbymoodleid[$token->userid])) {
+                    $this->tokensbymoodleid[$token->userid] = [];
+                }
+                $this->tokensbymoodleid[$token->userid][] = $token;
+            }
+        }
+
+        // Bulk fetch full user records.
+        $this->fullusersbymoodleid = [];
+        if ($moodleuserids) {
+            [$museridssql, $museridsparams] = $DB->get_in_or_equal($moodleuserids);
+            $fullusers = $DB->get_records_select('user', "id $museridssql", $museridsparams);
+            foreach ($fullusers as $fulluser) {
+                $this->fullusersbymoodleid[$fulluser->id] = $fulluser;
+            }
+        }
+
         $processedusers = [];
 
         $supportuseridentifierchangeconfig = get_config('local_o365', 'support_user_identifier_change');
 
+        $totalusers = count($entraidusers);
+        $currentuserindex = 0;
+
         foreach ($entraidusers as $entraiduser) {
+            $currentuserindex++;
             if (unified::is_configured()) {
                 $userobjectid = $entraiduser['id'];
             } else {
@@ -1203,12 +1769,15 @@ class main {
             if ($bindingusernameclaim != 'userPrincipalName') {
                 $outputmessage .= ' (UPN: ' . $entraiduser['userPrincipalName'] . ')';
             }
+
             $this->mtrace($outputmessage);
 
             // Process guest users.
             $entraiduser['convertedidentifier'] = $entraiduser['useridentifierlower'];
-            if ($guestsync && $bindingusernameclaim == 'userPrincipalName' &&
-                stripos($entraiduser['userPrincipalName'], '#EXT#') !== false) {
+            if (
+                $guestsync && $bindingusernameclaim == 'userPrincipalName' &&
+                stripos($entraiduser['userPrincipalName'], '#EXT#') !== false
+            ) {
                 $entraiduser['convertedidentifier'] = strtolower($entraiduser['mail']);
             }
 
@@ -1221,24 +1790,28 @@ class main {
 
             $needsyncprofile = false;
             $connected = false;
-            if (!isset($existingusers[$entraiduser['useridentifierlower']]) &&
+            if (
+                !isset($existingusers[$entraiduser['useridentifierlower']]) &&
                 (!isset($entraiduser['upnsplit0']) || !isset($existingusers[$entraiduser['upnsplit0']])) &&
-                !isset($existingusers[$entraiduser['convertedidentifier']])) {
+                !isset($existingusers[$entraiduser['convertedidentifier']])
+            ) {
                 // Check if the user has been renamed.
-                $syncnewuser = array_key_exists('create', $usersyncsettings);
-                if (isset($entraiduser['id']) && $entraiduser['id'] && $existingusermatching = $DB->get_record('local_o365_objects',
-                        ['type' => 'user', 'objectid' => $entraiduser['id']])) {
+                $renamewashandled = false;
+                if (
+                    isset($entraiduser['id']) && $entraiduser['id'] &&
+                    $existingusermatching = ($this->o365objectsbyobjectid[$entraiduser['id']] ?? null)
+                ) {
                     // This is a previously connected user who has been renamed in Microsoft.
                     $needsyncprofile = true;
 
-                    $renamedmoodleuser = core_user::get_user($existingusermatching->moodleid);
+                    $renamedmoodleuser = $this->fullusersbymoodleid[$existingusermatching->moodleid] ?? null;
                     if ($renamedmoodleuser) {
+                        $renamewashandled = true;
                         $this->mtrace('The user has been renamed in Microsoft...');
-                        $syncnewuser = false;
 
                         if ($supportuseridentifierchangeconfig == 1) {
                             // Check if manually matched users, who shouldn't be renamed.
-                            if ($DB->record_exists('local_o365_connections', ['muserid' => $renamedmoodleuser->id])) {
+                            if (isset($this->connectionsbymoodleid[$renamedmoodleuser->id])) {
                                 $this->mtrace('The user is manually matched, skipping renaming...');
                             } else {
                                 $this->mtrace('Updating Moodle username...');
@@ -1248,6 +1821,7 @@ class main {
                                 if (isset($entraiduser['convertedidentifier']) && $entraiduser['convertedidentifier']) {
                                     $username = $entraiduser['convertedidentifier'];
                                 }
+
                                 $username = trim(core_text::strtolower($username));
                                 $renamedmoodleuser->username = $username;
                                 user_update_user($renamedmoodleuser, false);
@@ -1257,13 +1831,16 @@ class main {
                                 $DB->update_record('local_o365_objects', $existingusermatching);
 
                                 // Update token record.
-                                if ($existingtoken = $DB->get_record('auth_oidc_token', ['userid' => $renamedmoodleuser->id])) {
+                                $usertokens = $this->tokensbymoodleid[$renamedmoodleuser->id] ?? [];
+                                if (!empty($usertokens)) {
+                                    $existingtoken = reset($usertokens);
                                     $existingtoken->useridentifier = $entraiduser['useridentifier'];
                                     $existingtoken->username = $username;
                                     $bindingusernameclaim = auth_oidc_get_binding_username_claim();
                                     if (in_array($bindingusernameclaim, ['upn', 'auto'])) {
                                         $existingtoken->oidcusername = $entraiduser['useridentifier'];
                                     }
+
                                     $DB->update_record('auth_oidc_token', $existingtoken);
                                 }
 
@@ -1280,17 +1857,49 @@ class main {
                                 $existinguserrecord->suspended = $renamedmoodleuser->suspended;
                                 $existinguserrecord->auth = $renamedmoodleuser->auth;
 
-                                $connected = $this->sync_existing_user($usersyncsettings, $entraiduser, $existinguserrecord,
-                                    $exactmatch);
+                                $connected = $this->sync_existing_user(
+                                    $usersyncsettings,
+                                    $entraiduser,
+                                    $existinguserrecord,
+                                    $exactmatch
+                                );
                                 $existinguser = $renamedmoodleuser;
                             }
                         } else {
                             $this->mtrace('The option to update Moodle username is disabled...');
+                            // Even though we're not updating the Moodle username, we should update the o365name
+                            // and token record so that future syncs and OIDC logins work correctly.
+                            $existingusermatching->o365name = $entraiduser['useridentifierlower'];
+                            $DB->update_record('local_o365_objects', $existingusermatching);
+
+                            // Update token record to prevent OIDC login failures.
+                            $usertokens = $this->tokensbymoodleid[$renamedmoodleuser->id] ?? [];
+                            if (!empty($usertokens)) {
+                                $existingtoken = reset($usertokens);
+                                $existingtoken->useridentifier = $entraiduser['useridentifier'];
+                                $bindingusernameclaim = auth_oidc_get_binding_username_claim();
+                                if (in_array($bindingusernameclaim, ['upn', 'auto'])) {
+                                    $existingtoken->oidcusername = $entraiduser['useridentifier'];
+                                }
+
+                                $DB->update_record('auth_oidc_token', $existingtoken);
+                            }
+
+                            $this->mtrace('Updated o365name and token to maintain sync and OIDC login mapping.');
                         }
                     }
                 }
-                if ($syncnewuser) {
-                    $this->sync_new_user($usersyncsettings, $entraiduser, isset($usersyncsettings['guestsync']));
+
+                if (!$renamewashandled) {
+                    // Not handled as a rename of a previously connected user. Hand off to sync_new_user(), which
+                    // creates the Moodle account when "Create accounts in Moodle" is enabled and otherwise logs why
+                    // the user is skipped. Previously this branch was skipped entirely when account creation was
+                    // disabled, leaving the sync output silent for Entra ID users with no linked Moodle account.
+                    $this->sync_new_user(
+                        $usersyncsettings,
+                        $entraiduser,
+                        isset($usersyncsettings['guestsync'])
+                    );
                 }
             } else {
                 // Entra ID user details match existing user record.
@@ -1301,31 +1910,34 @@ class main {
                 $userrenamefailed = false;
                 $userrenamed = false;
                 $syncexistinguser = true;
-                if (isset($entraiduser['id']) && $entraiduser['id'] &&
-                    $existingusermatching = $DB->get_record('local_o365_objects',
-                        ['type' => 'user', 'objectid' => $entraiduser['id']])) {
+                if (
+                    isset($entraiduser['id']) && $entraiduser['id'] &&
+                    $existingusermatching = ($this->o365objectsbyobjectid[$entraiduser['id']] ?? null)
+                ) {
                     $possibleo365names = [$entraiduser['useridentifierlower'], $entraiduser['convertedidentifier'],
                         $entraiduser['useridentifier']];
                     if (isset($entraiduser['upnsplit0'])) {
                         $possibleo365names[] = $entraiduser['upnsplit0'];
                     }
+
                     if (!in_array($existingusermatching->o365name, $possibleo365names)) {
                         $syncexistinguser = false;
                         $this->mtrace('The user has been renamed in Microsoft...');
                         if ($supportuseridentifierchangeconfig == 1) {
                             // Check if the user is manually matched, which shouldn't be renamed.
-                            if ($DB->record_exists('local_o365_connections', ['muserid' => $existingusermatching->moodleid])) {
+                            if (isset($this->connectionsbymoodleid[$existingusermatching->moodleid])) {
                                 $this->mtrace('The user is manually matched, skipping renaming...');
                             } else {
                                 // This is a previously connected user who has been renamed in Microsoft.
                                 $this->mtrace('Updating Moodle username...');
-                                $renamedmoodleuser = core_user::get_user($existingusermatching->moodleid);
+                                $renamedmoodleuser = $this->fullusersbymoodleid[$existingusermatching->moodleid] ?? null;
                                 if ($renamedmoodleuser) {
                                     // Update user record.
                                     $username = $entraiduser['useridentifier'];
                                     if (isset($entraiduser['convertedidentifier']) && $entraiduser['convertedidentifier']) {
                                         $username = $entraiduser['convertedidentifier'];
                                     }
+
                                     $username = trim(core_text::strtolower($username));
                                     // Check if existing user with same username exists.
                                     $userwithduplicateusername = core_user::get_user_by_username($username);
@@ -1345,8 +1957,9 @@ class main {
                                         $DB->update_record('local_o365_objects', $existingusermatching);
 
                                         // Update token record.
-                                        if ($existingtoken = $DB->get_record('auth_oidc_token',
-                                            ['userid' => $renamedmoodleuser->id])) {
+                                        $usertokens = $this->tokensbymoodleid[$renamedmoodleuser->id] ?? [];
+                                        if (!empty($usertokens)) {
+                                            $existingtoken = reset($usertokens);
                                             $existingtoken->useridentifier = $entraiduser['useridentifier'];
                                             $existingtoken->username = $username;
                                             $DB->update_record('auth_oidc_token', $existingtoken);
@@ -1356,6 +1969,28 @@ class main {
                             }
                         } else {
                             $this->mtrace('The option to update Moodle username is disabled...');
+                            // Even though we're not updating the Moodle username, we should update the o365name
+                            // and token record so that future syncs and OIDC logins work correctly.
+                            $existingusermatching->o365name = $entraiduser['useridentifierlower'];
+                            $DB->update_record('local_o365_objects', $existingusermatching);
+
+                            // Update token record to prevent OIDC login failures.
+                            $renamedmoodleuser = $this->fullusersbymoodleid[$existingusermatching->moodleid] ?? null;
+                            if ($renamedmoodleuser) {
+                                $usertokens = $this->tokensbymoodleid[$renamedmoodleuser->id] ?? [];
+                                if (!empty($usertokens)) {
+                                    $existingtoken = reset($usertokens);
+                                    $existingtoken->useridentifier = $entraiduser['useridentifier'];
+                                    $bindingusernameclaim = auth_oidc_get_binding_username_claim();
+                                    if (in_array($bindingusernameclaim, ['upn', 'auto'])) {
+                                        $existingtoken->oidcusername = $entraiduser['useridentifier'];
+                                    }
+
+                                    $DB->update_record('auth_oidc_token', $existingtoken);
+                                }
+                            }
+
+                            $this->mtrace('Updated o365name and token to maintain sync and OIDC login mapping.');
                         }
                     }
                 }
@@ -1386,28 +2021,43 @@ class main {
 
                     $connected = false;
                     if ($syncexistinguser) {
-                        $connected = $this->sync_existing_user($usersyncsettings, $entraiduser, $existinguser, $exactmatch);
+                        $connected = $this->sync_existing_user(
+                            $usersyncsettings,
+                            $entraiduser,
+                            $existinguser,
+                            $exactmatch
+                        );
                     }
 
-                    if (($existinguser->auth === 'oidc' || empty($existinguser->tokid)) && $connected) {
-                        // Create userobject if it does not exist.
-                        if (empty($existinguser->objectid)) {
-                            $this->mtrace('Adding o365 object record for user.');
-                            $now = time();
-                            $userobjectdata = (object) [
-                                'type' => 'user',
-                                'subtype' => '',
-                                'objectid' => $userobjectid,
-                                'o365name' => $entraiduser['useridentifier'],
-                                'moodleid' => $existinguser->muserid,
-                                'tenant' => '',
-                                'timecreated' => $now,
-                                'timemodified' => $now,
-                            ];
-                            $userobjectdata->id = $DB->insert_record('local_o365_objects', $userobjectdata);
+                    if ($connected) {
+                        if ($existinguser->auth === 'oidc' || empty($existinguser->tokid)) {
+                            // Create userobject if it does not exist.
+                            if (empty($existinguser->objectid)) {
+                                $this->mtrace('Adding o365 object record for user.');
+                                $now = time();
+                                $userobjectdata = (object) [
+                                    'type' => 'user',
+                                    'subtype' => '',
+                                    'objectid' => $userobjectid,
+                                    'o365name' => $entraiduser['useridentifier'],
+                                    'moodleid' => $existinguser->muserid,
+                                    'tenant' => '',
+                                    'timecreated' => $now,
+                                    'timemodified' => $now,
+                                ];
+                                $userobjectdata->id = $DB->insert_record('local_o365_objects', $userobjectdata);
+                            }
+
+                            // User already connected.
+                            $this->mtrace('Linked to Moodle account #' . $existinguser->muserid . '.');
+                        } else {
+                            // The user is matched to Microsoft Entra ID but authenticates with a non-OIDC method, so
+                            // there is no further account linking or profile syncing to do for them here.
+                            $this->mtrace(
+                                'No further action taken for this user (not using OIDC authentication, ' .
+                                'and no other applicable sync options enabled).'
+                            );
                         }
-                        // User already connected.
-                        $this->mtrace('User is now synced.');
                     }
                 }
             }
@@ -1416,20 +2066,26 @@ class main {
                 // Update existing user on moodle from AD.
                 if ($existinguser->auth === 'oidc' && $connected) {
                     if (isset($usersyncsettings['update'])) {
-                        $this->mtrace('Updating Moodle user data from Microsoft Entra ID user data.');
                         $fullexistinguser = get_complete_user_data('username', $existinguser->username);
                         if ($fullexistinguser) {
                             $existingusercopy = core_user::get_user_by_username($existinguser->username);
-                            $fullexistinguser->description = $existingusercopy->description;
+                            if ($existingusercopy) {
+                                $fullexistinguser->description = $existingusercopy->description;
+                                $fullexistinguser->descriptionformat = $existingusercopy->descriptionformat;
+                            }
                             $this->update_user_from_entra_id_data($entraiduser, $fullexistinguser);
-                            $this->mtrace('User is now updated.');
+                            $this->mtrace('Field mapping applied.');
                         } else {
                             $this->mtrace('Update failed for user with username "' . $existinguser->username . '".');
                         }
                     }
                 }
             }
-            $this->mtrace(' ');
+
+            // Add blank line between users, but not after the last user in the batch.
+            if ($currentuserindex < $totalusers) {
+                $this->mtrace('');
+            }
         }
 
         return true;
@@ -1441,9 +2097,12 @@ class main {
      * @param array $syncoptions
      * @param array $entraiduserdata
      * @param bool $syncguestusers
-     * @return false|stdClass|null
      */
-    protected function sync_new_user($syncoptions, $entraiduserdata, bool $syncguestusers = false) {
+    protected function sync_new_user(
+        array $syncoptions,
+        array $entraiduserdata,
+        bool $syncguestusers = false
+    ): void {
         global $DB;
 
         $this->mtrace('User doesn\'t exist in Moodle');
@@ -1457,7 +2116,7 @@ class main {
         // Create moodle account, if enabled.
         if (!isset($syncoptions['create'])) {
             $this->mtrace('Not creating a Moodle user because that sync option is disabled.');
-            return null;
+            return;
         }
 
         // Process guest users.
@@ -1466,7 +2125,7 @@ class main {
             if (!$syncguestusers) {
                 $this->mtrace('The option to sync guest users is turned off.');
                 $this->mtrace('User is not created.');
-                return null;
+                return;
             }
         }
 
@@ -1499,36 +2158,6 @@ class main {
                 $this->mtrace('Could not assign user "' . $entraiduserdata['useridentifier'] . '" Reason: ' . $e->getMessage());
             }
         }
-
-        // User photo sync.
-        if (!empty($syncoptions['photosync'])) {
-            if (!PHPUNIT_TEST && !defined('BEHAT_SITE_RUNNING')) {
-                try {
-                    if (!empty($newmuser)) {
-                        $this->assign_photo($newmuser->id, true);
-                    }
-                } catch (moodle_exception $e) {
-                    $this->mtrace('Could not assign photo to user "' . $entraiduserdata['useridentifier'] . '" Reason: ' .
-                        $e->getMessage());
-                }
-            }
-        }
-
-        // User timezone.
-        if (!empty($syncoptions['tzsync'])) {
-            if (!PHPUNIT_TEST && !defined('BEHAT_SITE_RUNNING')) {
-                try {
-                    if (!empty($newmuser)) {
-                        $this->sync_timezone($newmuser->id, true);
-                    }
-                } catch (moodle_exception $e) {
-                    $this->mtrace('Could not sync timezone for user "' . $entraiduserdata['useridentifier'] . '" Reason: ' .
-                        $e->getMessage());
-                }
-            }
-        }
-
-        return $newmuser;
     }
 
     /**
@@ -1541,33 +2170,46 @@ class main {
      *
      * @return bool
      */
-    protected function sync_existing_user($syncoptions, $entraiduserdata, $existinguser, $exactmatch) {
+    protected function sync_existing_user(
+        array $syncoptions,
+        array $entraiduserdata,
+        $existinguser,
+        $exactmatch
+    ): bool {
         global $DB;
-
-        $photoexpire = get_config('local_o365', 'photoexpire');
-        if (empty($photoexpire) || !is_numeric($photoexpire)) {
-            $photoexpire = 24;
-        }
-        $photoexpiresec = $photoexpire * 3600;
 
         $userobjectid = (unified::is_configured()) ? $entraiduserdata['id'] : $entraiduserdata['objectId'];
 
         // Check for user GUID changes.
-        // There shouldn't be multiple token records, but just in case.
-        $oidctokenrecords = $DB->get_records('auth_oidc_token',
-            ['userid' => $existinguser->muserid, 'useridentifier' => $existinguser->username]);
+        // Use pre-fetched tokens to avoid N+1 query problem.
+        $oidctokenrecords = $this->tokensbymoodleid[$existinguser->muserid] ?? [];
         foreach ($oidctokenrecords as $oidctokenrecord) {
-            if ($oidctokenrecord->oidcuniqid != $userobjectid) {
+            // Check if token matches the expected useridentifier and has correct GUID.
+            if (
+                $oidctokenrecord->useridentifier == $existinguser->username &&
+                $oidctokenrecord->oidcuniqid != $userobjectid
+            ) {
                 $DB->delete_records('auth_oidc_token', ['id' => $oidctokenrecord->id]);
                 $this->mtrace('Deleted auth_oidc token due to conflicts.');
             }
         }
 
-        if ($localo365objectrecord = $DB->get_record('local_o365_objects', ['id' => $existinguser->objectid])) {
-            if ($localo365objectrecord->objectid != $userobjectid) {
-                $localo365objectrecord->objectid = $userobjectid;
-                $DB->update_record('local_o365_objects', $localo365objectrecord);
-                $this->mtrace('Updated user object ID in local_o365_object record.');
+        // The stored Entra ID is usually already available from the existing user query. Fall back to the
+        // pre-fetched object cache (no extra DB query) if this record was built without it, to detect a
+        // changed GUID (e.g. the Entra ID account was deleted and recreated).
+        if (!empty($existinguser->objectid)) {
+            if (isset($existinguser->o365objectid)) {
+                $storedobjectid = $existinguser->o365objectid;
+            } else {
+                $cachedobject = $this->o365objectsbymoodleid[$existinguser->muserid] ?? null;
+                $storedobjectid = $cachedobject->objectid ?? null;
+            }
+
+            if ($storedobjectid != $userobjectid) {
+                $updated = $DB->set_field('local_o365_objects', 'objectid', $userobjectid, ['id' => $existinguser->objectid]);
+                if ($updated) {
+                    $this->mtrace('Updated user object ID in local_o365_objects record.');
+                }
             }
         }
 
@@ -1579,52 +2221,7 @@ class main {
                         $this->assign_user($existinguser->muserid, $userobjectid);
                     }
                 } catch (moodle_exception $e) {
-                    $this->mtrace('Could not assign user "'.$entraiduserdata['useridentifier'].'" Reason: '.$e->getMessage());
-                }
-            }
-        }
-
-        // Perform photo sync.
-        if (isset($syncoptions['photosync'])) {
-            if (empty($existinguser->photoupdated) || ($existinguser->photoupdated + $photoexpiresec) < time()) {
-                try {
-                    if (!PHPUNIT_TEST && !defined('BEHAT_SITE_RUNNING')) {
-                        $this->assign_photo($existinguser->muserid, true);
-                    }
-                } catch (moodle_exception $e) {
-                    $this->mtrace('Could not assign profile photo to user "' . $entraiduserdata['useridentifier'] . '" Reason: ' .
-                        $e->getMessage());
-                }
-            }
-        }
-
-        // Perform timezone sync.
-        if (isset($syncoptions['tzsync'])) {
-            try {
-                if (!PHPUNIT_TEST && !defined('BEHAT_SITE_RUNNING')) {
-                    $this->sync_timezone($existinguser->muserid, true);
-                }
-            } catch (moodle_exception $e) {
-                $this->mtrace('Could not sync timezone for user "' . $entraiduserdata['useridentifier'] . '" Reason: ' .
-                    $e->getMessage());
-            }
-        }
-
-        // Sync disabled status.
-        if (isset($syncoptions['disabledsync'])) {
-            if (isset($entraiduserdata['accountEnabled'])) {
-                if ($entraiduserdata['accountEnabled']) {
-                    if ($existinguser->suspended == 1) {
-                        $completeexistinguser = core_user::get_user($existinguser->muserid);
-                        $completeexistinguser->suspended = 0;
-                        user_update_user($completeexistinguser, false);
-                    }
-                } else {
-                    if ($existinguser->suspended == 0) {
-                        $completeexistinguser = core_user::get_user($existinguser->muserid);
-                        $completeexistinguser->suspended = 1;
-                        user_update_user($completeexistinguser, false);
-                    }
+                    $this->mtrace('Could not assign user "' . $entraiduserdata['useridentifier'] . '" Reason: ' . $e->getMessage());
                 }
             }
         }
@@ -1633,8 +2230,11 @@ class main {
         if (isset($syncoptions['match']) || isset($syncoptions['matchswitchauth'])) {
             if ($existinguser->auth !== 'oidc') {
                 $this->mtrace('Found a user in Microsoft Entra ID that seems to match a user in Moodle');
-                $this->mtrace(sprintf('moodle username: %s, Entra ID user identifier: %s', $existinguser->username,
-                    $entraiduserdata['useridentifierlower']));
+                $this->mtrace(sprintf(
+                    'moodle username: %s, Entra ID user identifier: %s',
+                    $existinguser->username,
+                    $entraiduserdata['useridentifierlower']
+                ));
                 return $this->sync_users_matchuser($syncoptions, $entraiduserdata, $existinguser, $exactmatch);
             } else {
                 $this->mtrace('The user is already using OIDC for authentication.');
@@ -1643,6 +2243,51 @@ class main {
         }
 
         return true;
+    }
+
+    /**
+     * Initialize sync cache by pre-fetching all database data once.
+     * This eliminates redundant queries when processing batches.
+     *
+     * @param string $bindingusernameclaim Binding username claim
+     * @return stdClass Cache object with pre-fetched data
+     */
+    public function init_sync_cache(string $bindingusernameclaim): stdClass {
+        global $DB, $CFG;
+
+        $cache = new stdClass();
+        $cache->usersyncsettings = $this->get_sync_options();
+        $cache->bindingusernameclaim = $bindingusernameclaim;
+
+        // Cache one-time queries that don't change per batch.
+        $cache->duplicateemailaddresses = null;  // Lazy-loaded on first use.
+
+        return $cache;
+    }
+
+    /**
+     * Sync users using pre-initialized cache (eliminates redundant queries).
+     *
+     * @param array $entraidusers Batch of Entra ID users
+     * @param stdClass $cache Pre-initialized cache
+     * @param string $bindingusernameclaim Binding claim
+     * @return bool Success
+     */
+    public function sync_users_with_cache(
+        array $entraidusers,
+        stdClass $cache,
+        string $bindingusernameclaim = 'userPrincipalName'
+    ): bool {
+        // Store cache in instance variable so sync_users can access it.
+        $this->synccache = $cache;
+
+        // Call the original sync_users method.
+        $result = $this->sync_users($entraidusers, $bindingusernameclaim);
+
+        // Clear cache reference.
+        $this->synccache = null;
+
+        return $result;
     }
 
     /**
@@ -1683,6 +2328,7 @@ class main {
                     // Delete existing connection before linking (in case matching was performed without auth switching previously).
                     $DB->delete_records_select('local_o365_connections', "id = {$existinguser->existingconnectionid}");
                 }
+
                 $fullexistinguser = get_complete_user_data('username', $existinguser->username);
                 $existinguser->id = $fullexistinguser->id;
                 $existinguser->auth = 'oidc';
@@ -1703,8 +2349,9 @@ class main {
             return true;
         } else {
             // Match to o365 account, if enabled.
-            if ($existingconnectionrecord = $DB->get_record('local_o365_connections',
-                ['entraidupn' => $entraiduserdata['useridentifierlower']])) {
+            if (
+                $existingconnectionrecord = ($this->connectionsbyentraidupn[$entraiduserdata['useridentifierlower']] ?? null)
+            ) {
                 if ($existingconnectionrecord->muserid != $existinguser->muserid) {
                     $existingconnectionrecord->muserid = $existinguser->muserid;
                     $DB->update_record('local_o365_connections', $existingconnectionrecord);
@@ -1716,7 +2363,13 @@ class main {
                     'uselogin' => isset($syncoptions['matchswitchauth']) ? 1 : 0,
                 ];
                 $DB->insert_record('local_o365_connections', $matchrec);
-                $this->mtrace('Matched user, but did not switch them to OIDC.');
+                if (isset($syncoptions['matchswitchauth']) && !$exactmatch) {
+                    $this->mtrace('Matched user, but the username is not an exact match to the Microsoft Entra ID UPN ' .
+                        'and does not meet the exact-match requirements for switching to OIDC (see the "Minimum ' .
+                        'inexact username length to switch to Microsoft 365" setting); not switching to OIDC.');
+                } else {
+                    $this->mtrace('Matched user, but did not switch them to OIDC.');
+                }
             }
 
             return true;
@@ -1724,159 +2377,566 @@ class main {
     }
 
     /**
-     * Suspend users that have been deleted from Microsoft Entra ID, and optionally delete them.
-     * This function will get the list of recently deleted users in the last 30 days first, and suspend their accounts.
-     * It will then try to find all remaining users matched with Microsoft Entra ID users, and check if a valid user can be found
-     * in Microsoft Entra ID.
-     * If a valid user is not found, it will suspend the user in the first run, and delete it in the next run if the option is set.
+     * Preload user context records into the static context cache in one bulk query.
      *
-     * So in a normal use case, where the option is enabled and not changed, and a Microsoft Entra ID account is deleted:
-     *  - Their matching Moodle account will be suspended on the first task run after Microsoft Entra ID account deletion;
-     *  - The account will be deleted on the first run 30 days after their Microsoft Entra ID account deletion, if $delete is true.
+     * Eliminates the per-user SELECT against {context} that context_user::instance() would
+     * otherwise issue inside the user_updated event trigger loop.
      *
-     * In case the option to delete Moodle users is changed from disabled to enabled:
-     *  - If the deletion of the Microsoft 365 account happened before 30 days:
-     *    - The matching Moodle account will be suspended on the first task run after the configuration change is made.
-     *    - The account will be deleted on the second task run after the configuration change is made, if $delete is true.
-     *  - If the deletion of the Microsoft 365 account happened within 30 days:
-     *    - The matching Moodle account will be suspended on the first task run after the configuration change is made.
-     *    - The account will be deleted on the first run 30 days after their Microsoft 365 account deletion, if $delete is true.
-     *
-     * Note this will not catch oidc users without matching Microsoft 365 account.
-     *
-     * @param array $entraidusers
-     * @param bool $delete
-     *
-     * @return bool
+     * @param int[] $userids Moodle user IDs whose contexts should be preloaded.
      */
-    public function suspend_users(array $entraidusers, bool $delete = false) {
-        global $CFG, $DB;
-
-        $apiclient = $this->construct_user_api();
-
-        try {
-            $deletedusersids = [];
-
-            $deletedusers = $apiclient->list_deleted_users();
-            foreach ($deletedusers as $deleteduser) {
-                if (!empty($deleteduser) && isset($deleteduser['id'])) {
-                    // Check for synced user.
-                    $sql = 'SELECT u.*
-                              FROM {user} u
-                              JOIN {local_o365_objects} obj ON obj.type = ? AND obj.moodleid = u.id
-                             WHERE u.mnethostid = ?
-                               AND u.deleted = ?
-                               AND u.suspended = ?
-                               AND u.auth = ?
-                               AND obj.objectid = ? ';
-                    $params = ['user', $CFG->mnet_localhost_id, '0', '0', 'oidc', $deleteduser['id']];
-                    $synceduser = $DB->get_record_sql($sql, $params);
-                    if (!empty($synceduser)) {
-                        $synceduser->suspended = 1;
-                        user_update_user($synceduser, false);
-                        $this->mtrace($synceduser->username . ' was deleted in Entra ID, the matching account is suspended.');
-                    }
-                    $deletedusersids[] = $deleteduser['id'];
-                }
-            }
-
-            $existingsql = 'SELECT u.*, obj.objectid
-                              FROM {user} u
-                              JOIN {local_o365_objects} obj ON obj.type = ? AND obj.moodleid = u.id
-                             WHERE u.mnethostid = ?
-                               AND u.deleted = ?
-                               AND u.auth = ? ';
-            $existingsqlparams = ['user', $CFG->mnet_localhost_id, '0', 'oidc'];
-            if ($deletedusersids) {
-                // Check if all Moodle users with oidc authentication and matching records are still existing users in Entra ID.
-                [$objectidsql, $objectidparams] = $DB->get_in_or_equal($deletedusersids, SQL_PARAMS_QM, 'param', false);
-                $existingsql .= ' AND obj.objectid ' . $objectidsql;
-                $existingsqlparams = array_merge($existingsqlparams, $objectidparams);
-            }
-
-            $existingusers = $DB->get_records_sql($existingsql, $existingsqlparams);
-            $validentraiduserids = [];
-            foreach ($entraidusers as $entraiduser) {
-                $validentraiduserids[] = $entraiduser['id'];
-            }
-
-            foreach ($existingusers as $existinguser) {
-                if (!in_array($existinguser->objectid, $validentraiduserids)) {
-                    if ($existinguser->suspended) {
-                        if ($delete) {
-                            $this->mtrace('Could not find suspended user ' . $existinguser->username .
-                                ' in Microsoft Entra ID. Deleting user...');
-                            unset($existinguser->objectid);
-                            delete_user($existinguser);
-                        }
-                    } else if (!$existinguser->suspended) {
-                        $this->mtrace('Could not find user ' . $existinguser->username .
-                            ' in Microsoft Entra ID. Suspending user...');
-                        $existinguser->suspended = 1;
-                        unset($existinguser->objectid);
-                        user_update_user($existinguser, false);
-                    }
-                }
-            }
-
-            return true;
-        } catch (moodle_exception $e) {
-            utils::debug('Could not delete users', __METHOD__, $e);
-
-            return false;
+    private function preload_user_contexts(array $userids): void {
+        global $DB;
+        if (empty($userids)) {
+            return;
+        }
+        [$insql, $inparams] = $DB->get_in_or_equal($userids, SQL_PARAMS_QM);
+        $sql = 'SELECT u.id, ' . \context_helper::get_preload_record_columns_sql('ctx') . '
+                  FROM {user} u
+                  JOIN {context} ctx ON ctx.contextlevel = ' . CONTEXT_USER . '
+                                    AND ctx.instanceid = u.id
+                 WHERE u.id ' . $insql;
+        foreach ($DB->get_records_sql($sql, $inparams) as $rec) {
+            \context_helper::preload_from_record($rec);
         }
     }
 
     /**
-     * Re-enable suspended users.
-     * This function will ensure that for all the users in the array received, if they have a Moodle account that's suspended but
-     * not deleted, the account will unsuspended.
+     * Update users' suspended status and trigger events.
      *
-     * @param array $entraidusers
-     * @param bool $syncdisabledstatus
-     *
-     * @return bool
+     * @param int $suspendedvalue 0 to reenable, 1 to suspend.
+     * @param array $userids User IDs to update.
      */
-    public function reenable_suspsend_users(array $entraidusers, $syncdisabledstatus) {
+    private function update_users_suspended(int $suspendedvalue, array $userids): void {
         global $DB;
 
-        $valientraiduserids = [];
-        if ($syncdisabledstatus) {
-            foreach ($entraidusers as $entraiduser) {
-                if ($entraiduser['accountEnabled']) {
-                    $valientraiduserids[] = $entraiduser['id'];
-                }
+        if (empty($userids)) {
+            return;
+        }
+
+        $now = time();
+        [$useridsql, $useridparams] = $DB->get_in_or_equal($userids, SQL_PARAMS_QM);
+        $sql = 'UPDATE {user} SET suspended = ?, timemodified = ? WHERE id ' . $useridsql;
+        $params = array_merge([$suspendedvalue, $now], $useridparams);
+        $DB->execute($sql, $params);
+
+        if ($suspendedvalue) {
+            foreach ($userids as $userid) {
+                set_user_preference(self::SUSPENDED_TIME_PREFERENCE, $now, $userid);
             }
         } else {
-            foreach ($entraidusers as $entraiduser) {
-                $valientraiduserids[] = $entraiduser['id'];
+            foreach ($userids as $userid) {
+                unset_user_preference(self::SUSPENDED_TIME_PREFERENCE, $userid);
             }
         }
 
-        if ($valientraiduserids) {
-            [$objectidsql, $objectidparams] = $DB->get_in_or_equal($valientraiduserids, SQL_PARAMS_NAMED);
-            $query = 'SELECT u.*
-                        FROM {user} u
-                        JOIN {local_o365_objects} obj ON obj.type = :user AND obj.moodleid = u.id
-                       WHERE u.auth = :oidc
-                         AND u.deleted = :deleted
-                         AND u.suspended = :suspended
-                         AND obj.objectid ' . $objectidsql;
-            $params = [
-                'user' => 'user',
-                'oidc' => 'oidc',
-                'deleted' => 0,
-                'suspended' => 1,
-            ];
-            $params = array_merge($params, $objectidparams);
-            $suspendedusers = $DB->get_records_sql($query, $params);
-            foreach ($suspendedusers as $suspendeduser) {
-                $this->mtrace('Re-enabling user ' . $suspendeduser->username . '...');
-                $suspendeduser->suspended = 0;
-                user_update_user($suspendeduser, false);
+        $this->preload_user_contexts($userids);
+        foreach ($userids as $userid) {
+            \core\event\user_updated::create_from_userid($userid)->trigger();
+        }
+    }
+
+    /**
+     * Create a temporary table to hold Entra users with their enabled status.
+     *
+     * @return string The name of the created temporary table.
+     */
+    public function create_entra_users_temp_table(): string {
+        global $DB;
+
+        $dbman = $DB->get_manager();
+        $tempname = 'o365_entra_' . uniqid();
+
+        // Drop if exists (cleanup from previous runs).
+        $table = new \xmldb_table($tempname);
+        if ($dbman->table_exists($table)) {
+            $dbman->drop_table($table);
+        }
+
+        // Create temp table with objectid, accountenabled status, the binding username claim value (used to match
+        // Moodle accounts that have no local_o365_objects record - see suspend_unlinked_users_from_temp_table()) and
+        // the user sync group membership flag.
+        $table = new \xmldb_table($tempname);
+        $table->add_field('objectid', XMLDB_TYPE_CHAR, 255, null, XMLDB_NOTNULL, null, null);
+        $table->add_field('accountenabled', XMLDB_TYPE_INTEGER, 1, null, XMLDB_NOTNULL, null, 0);
+        $table->add_field('bindingvalue', XMLDB_TYPE_CHAR, 255, null, null, null, null);
+        $table->add_field('ingroup', XMLDB_TYPE_INTEGER, 1, null, XMLDB_NOTNULL, null, 1);
+        $table->add_index('objectid', XMLDB_INDEX_UNIQUE, ['objectid']);
+        $table->add_index('bindingvalue', XMLDB_INDEX_NOTUNIQUE, ['bindingvalue']);
+
+        $dbman->create_temp_table($table);
+
+        return $tempname;
+    }
+
+    /**
+     * Drop a temporary Entra users table.
+     *
+     * @param string $temptablename The name of the table to drop.
+     */
+    public function drop_entra_users_temp_table(string $temptablename): void {
+        global $DB;
+
+        $dbman = $DB->get_manager();
+        $table = new \xmldb_table($temptablename);
+        if ($dbman->table_exists($table)) {
+            $dbman->drop_table($table);
+        }
+    }
+
+    /**
+     * Populate the Entra users temporary table by streaming from the Entra API.
+     *
+     * Streams API results directly into database without accumulating in PHP memory.
+     *
+     * This method deliberately fetches ALL Entra users regardless of any usersyncgroupfilter
+     * setting. The temporary table is consumed by the enabled-status sync task
+     * (userenabledstatussync), which must be able to suspend or delete Moodle accounts for
+     * users who have been disabled or removed from Entra ID — even if those users were never
+     * members of the configured sync group. Scoping this query to the group would create a
+     * blind spot where deleted non-member accounts are never suspended.
+     *
+     * See also: process_users_minimal_batched() and settings_usersyncgroupfilter_details.
+     *
+     * @param string $temptablename The name of the temporary table to populate.
+     */
+    public function populate_entra_users_temp_table(string $temptablename): void {
+        global $DB;
+
+        $apiclient = $this->construct_user_api();
+        $insertcount = 0;
+        $bindingcount = 0;
+
+        // Also fetch the field that maps to the Moodle username, so accounts without a local_o365_objects record can be
+        // matched to Entra. Null means the configured binding claim is not a queryable Graph field.
+        $bindingfield = self::get_binding_graph_field();
+        $extraselect = ($bindingfield !== null && $bindingfield !== 'id') ? [$bindingfield] : [];
+
+        // Intentionally unfiltered — see method docblock for rationale.
+        $apiclient->process_users_minimal_batched(
+            function (array $entrabatch) use ($DB, $temptablename, &$insertcount, &$bindingcount, $bindingfield) {
+                $records = [];
+                foreach ($entrabatch as $user) {
+                    if (!empty($user['id'])) {
+                        $record = new \stdClass();
+                        $record->objectid = $user['id'];
+                        $record->accountenabled = ($user['accountEnabled'] ?? false) ? 1 : 0;
+                        $record->bindingvalue = null;
+                        if ($bindingfield === 'id') {
+                            $record->bindingvalue = core_text::strtolower($user['id']);
+                        } else if ($bindingfield !== null && !empty($user[$bindingfield])) {
+                            $record->bindingvalue = core_text::strtolower($user[$bindingfield]);
+                        }
+                        if ($record->bindingvalue !== null) {
+                            $bindingcount++;
+                        }
+                        $records[] = $record;
+                    }
+                }
+
+                if (!empty($records)) {
+                    $DB->insert_records($temptablename, $records);
+                    $insertcount += count($records);
+                }
+            },
+            $extraselect
+        );
+
+        $this->mtrace('Inserted ' . $insertcount . ' Entra users into temp table (' . $bindingcount .
+            ' with a usable binding value).');
+    }
+
+    /**
+     * Get the lowercased domains of all additional tenants configured in local_o365, including legacy ones.
+     *
+     * @return array Domain names as keys.
+     */
+    private function get_additional_tenant_domains(): array {
+        $domains = [];
+        $tenants = json_decode((string) get_config('local_o365', 'multitenants'), true);
+        $configureddomains = [];
+        if (is_array($tenants)) {
+            foreach ($tenants as $tenantdomains) {
+                $configureddomains = array_merge($configureddomains, (array) $tenantdomains);
             }
+        }
+
+        // Legacy configuration is a flat array of domains.
+        $legacydomains = json_decode((string) get_config('local_o365', 'legacymultitenants'), true);
+        if (is_array($legacydomains)) {
+            $configureddomains = array_merge($configureddomains, $legacydomains);
+        }
+
+        foreach ($configureddomains as $domain) {
+            if (is_string($domain) && trim($domain) !== '') {
+                $domains[core_text::strtolower(trim($domain))] = true;
+            }
+        }
+
+        return $domains;
+    }
+
+    /**
+     * Check whether a Moodle user belongs to an additional tenant, based on the domain of their Entra identifier.
+     *
+     * @param stdClass $user Record having o365name and username.
+     * @param array $additionaltenantdomains Result of get_additional_tenant_domains().
+     * @return bool
+     */
+    private function is_additional_tenant_user(stdClass $user, array $additionaltenantdomains): bool {
+        if (empty($additionaltenantdomains)) {
+            return false;
+        }
+
+        $identifier = !empty($user->o365name) ? $user->o365name : $user->username;
+        $atpos = strrpos($identifier, '@');
+        if ($atpos === false) {
+            return false;
+        }
+
+        return isset($additionaltenantdomains[core_text::strtolower(substr($identifier, $atpos + 1))]);
+    }
+
+    /**
+     * Flag which users in the Entra users temporary table are members or owners of the user sync group.
+     *
+     * Every user in the table is first flagged as not in the group, then group members and owners are flagged as in it.
+     * Returns false without leaving the table in a half-marked state when no group filter is configured, the group members
+     * cannot be retrieved, or the group has no members, so that callers never suspend users based on an incomplete result.
+     *
+     * @param string $temptablename The name of the temporary table populated by populate_entra_users_temp_table().
+     * @return bool Whether group membership was marked successfully.
+     */
+    public function mark_group_members_in_temp_table(string $temptablename): bool {
+        global $DB;
+
+        $groupid = $this->get_usersync_group_filter();
+        if (empty($groupid)) {
+            return false;
+        }
+
+        $memberids = [];
+        try {
+            $apiclient = $this->construct_user_api();
+            $apiclient->process_group_members_batched($groupid, function (array $batch) use (&$memberids) {
+                foreach ($batch as $user) {
+                    if (!empty($user['id'])) {
+                        $memberids[$user['id']] = true;
+                    }
+                }
+            }, ['id']);
+        } catch (moodle_exception $e) {
+            $this->mtrace('Error retrieving user sync group members: ' . $e->getMessage());
+            return false;
+        }
+
+        if (empty($memberids)) {
+            return false;
+        }
+
+        $DB->execute('UPDATE {' . $temptablename . '} SET ingroup = 0');
+        foreach (array_chunk(array_keys($memberids), 500) as $chunk) {
+            [$idsql, $idparams] = $DB->get_in_or_equal($chunk, SQL_PARAMS_QM);
+            $DB->execute('UPDATE {' . $temptablename . '} SET ingroup = 1 WHERE objectid ' . $idsql, $idparams);
         }
 
         return true;
+    }
+
+    /**
+     * Process all user status changes in a single pass through Moodle users.
+     *
+     * Combines reenable and suspend logic into one query to minimize memory overhead
+     * from multiple passes through the user table.
+     *
+     * Suspended users are deleted only after Entra's soft-delete retention has ended and, if the
+     * usersync_delete_delay setting is greater than 0, that long after the suspension time stored in the
+     * SUSPENDED_TIME_PREFERENCE user preference.
+     *
+     * @param string $temptablename The name of the temporary table with Entra users.
+     * @param bool $doreenable Whether to reenable users who reappear in Entra with an enabled account.
+     * @param bool $dosuspend Whether to suspend users who are no longer in Entra.
+     * @param bool $dodelete Whether to delete suspended users.
+     * @param bool $dodisabledsyncsuspend Whether to suspend users whose Entra account is disabled.
+     * @param bool $dodisabledsyncreenable Whether to reenable users whose Entra account is (re-)enabled.
+     * @param bool $dosuspendunlinked Whether to also suspend oidc accounts that have no local_o365_objects record,
+     *                                matched to Entra by the binding username claim. Suspend only, never delete.
+     * @param bool $dogroupsuspend Whether to suspend users who are still in Entra but flagged as not in the user sync group
+     *                             (see mark_group_members_in_temp_table()). Such users are also never re-enabled.
+     *
+     * @return array [$reenabled, $suspended, $deleted] counts.
+     */
+    public function process_user_status_from_temp_table(
+        string $temptablename,
+        bool $doreenable,
+        bool $dosuspend,
+        bool $dodelete,
+        bool $dodisabledsyncsuspend,
+        bool $dodisabledsyncreenable,
+        bool $dosuspendunlinked = false,
+        bool $dogroupsuspend = false
+    ): array {
+        global $CFG, $DB;
+
+        $reenabled = 0;
+        $suspended = 0;
+        $deleted = 0;
+        $userstoreenable = [];
+        $userstosuspend = [];
+        $deletedelay = (int) get_config('local_o365', 'usersync_delete_delay');
+
+        // Build set of deleted user IDs in retention (fetched in batches to minimize memory overhead).
+        // Stored as sparse array: objectid => true for quick isset() checks.
+        $deletedentrajsonids = [];
+        if ($dodelete) {
+            $apiclient = $this->construct_user_api();
+            $apiclient->process_deleted_users_batched(function (array $deletedbatch) use (&$deletedentrajsonids) {
+                foreach ($deletedbatch as $deleteduser) {
+                    if (!empty($deleteduser['id'])) {
+                        $deletedentrajsonids[$deleteduser['id']] = true;
+                    }
+                }
+            });
+        }
+
+        // Single query: join with temp table to identify reenable candidates, and identify suspend candidates.
+        $additionaltenantdomains = $this->get_additional_tenant_domains();
+
+        $sql = 'SELECT u.id, u.username, u.suspended, etmp.accountenabled, etmp.ingroup, obj.objectid, obj.o365name,
+                       pref.value AS suspendedtime,
+                       CASE WHEN etmp.objectid IS NOT NULL THEN 1 ELSE 0 END AS isinentra
+                  FROM {user} u
+                  JOIN {local_o365_objects} obj ON obj.type = ? AND obj.moodleid = u.id
+                  LEFT JOIN {user_preferences} pref ON pref.userid = u.id AND pref.name = ?
+                  LEFT JOIN {' . $temptablename . '} etmp ON etmp.objectid = obj.objectid
+                 WHERE u.mnethostid = ?
+                   AND u.deleted = ?
+                   AND u.auth = ?';
+        $params = ['user', self::SUSPENDED_TIME_PREFERENCE, $CFG->mnet_localhost_id, '0', 'oidc'];
+
+        $usersrs = $DB->get_recordset_sql($sql, $params);
+
+        foreach ($usersrs as $user) {
+            if (!$user->isinentra && $this->is_additional_tenant_user($user, $additionaltenantdomains)) {
+                // The Entra user list only covers the hosting tenant, so users from additional tenants are never in it.
+                continue;
+            }
+
+            if ($user->isinentra) {
+                $notingroup = $dogroupsuspend && !$user->ingroup;
+                if ($user->suspended) {
+                    // User is in Entra and currently suspended - reenable only if their Entra account is allowed to sign in,
+                    // either because they reappeared in Entra ($doreenable) or because their Entra account has been
+                    // (re-)enabled ($dodisabledsyncreenable). Accounts blocked from signing in are never reenabled, and
+                    // neither are users who are not in the configured user sync group.
+                    if ($user->accountenabled && ($doreenable || $dodisabledsyncreenable) && !$notingroup) {
+                        $userstoreenable[] = $user->id;
+                        $this->mtrace('Re-enabling user ' . $user->username . '...');
+                        $reenabled++;
+
+                        if (count($userstoreenable) >= 500) {
+                            $this->update_users_suspended(0, $userstoreenable);
+                            $userstoreenable = [];
+                        }
+                    }
+                } else if ($notingroup) {
+                    // User is in Entra and not suspended, but is not a member or owner of the user sync group (whether or
+                    // not they ever were) - suspend.
+                    $userstosuspend[] = $user->id;
+                    $this->mtrace('Suspended ' . $user->username . ' (not in configured user sync group)');
+                    $suspended++;
+
+                    if (count($userstosuspend) >= 500) {
+                        $this->update_users_suspended(1, $userstosuspend);
+                        $userstosuspend = [];
+                    }
+                } else if ($dodisabledsyncsuspend && !$user->accountenabled) {
+                    // User is in Entra but their account has been disabled, and not already suspended - suspend,
+                    // independent of $dosuspend (which only applies to users no longer in Entra at all).
+                    $userstosuspend[] = $user->id;
+                    $this->mtrace('Suspended ' . $user->username . ' (disabled in Entra ID)');
+                    $suspended++;
+
+                    if (count($userstosuspend) >= 500) {
+                        $this->update_users_suspended(1, $userstosuspend);
+                        $userstosuspend = [];
+                    }
+                }
+            } else if ($dosuspend && !$user->suspended) {
+                // User is NOT in Entra (deleted) and not suspended - suspend.
+                $userstosuspend[] = $user->id;
+                $this->mtrace('Suspended ' . $user->username . ' (deleted in Entra ID)');
+                $suspended++;
+
+                if (count($userstosuspend) >= 500) {
+                    $this->update_users_suspended(1, $userstosuspend);
+                    $userstosuspend = [];
+                }
+            } else if ($dosuspend && $user->suspended && $dodelete) {
+                // User is NOT in Entra and already suspended - delete only when the configured delay since suspension has
+                // passed and the user is not in Entra's deleted-items (soft-delete retention expired).
+                if ($deletedelay > 0) {
+                    $now = time();
+                    $suspendedtime = (int) $user->suspendedtime;
+                    if (!$suspendedtime) {
+                        // Suspended before the delay was tracked - start the clock now.
+                        set_user_preference(self::SUSPENDED_TIME_PREFERENCE, $now, $user->id);
+                        continue;
+                    }
+                    if ($suspendedtime + $deletedelay > $now) {
+                        continue;
+                    }
+                }
+
+                if (!isset($deletedentrajsonids[$user->objectid])) {
+                    $this->mtrace('Deleted ' . $user->username . ' (permanently deleted from Entra ID)');
+                    $fulluser = $DB->get_record('user', ['id' => $user->id]);
+                    delete_user($fulluser);
+                    $deleted++;
+                }
+            }
+        }
+
+        $usersrs->close();
+
+        // Flush any remaining batches.
+        if (!empty($userstoreenable)) {
+            $this->update_users_suspended(0, $userstoreenable);
+        }
+        if (!empty($userstosuspend)) {
+            $this->update_users_suspended(1, $userstosuspend);
+        }
+
+        // Handle oidc accounts that have no local_o365_objects record (never synced, or the record was removed). These
+        // are invisible to the query above because it inner-joins local_o365_objects. Suspend only - never delete.
+        if ($dosuspendunlinked && ($dosuspend || $dodisabledsyncsuspend)) {
+            $suspended += $this->suspend_unlinked_users_from_temp_table($temptablename, $dosuspend, $dodisabledsyncsuspend);
+        }
+
+        return [$reenabled, $suspended, $deleted];
+    }
+
+    /**
+     * Suspend oidc Moodle accounts that have no local_o365_objects record, by matching the Moodle username against the
+     * Entra binding username claim value stored in the temp table.
+     *
+     * These accounts carry no stored Entra object id, so this method never deletes (the soft-delete retention check in
+     * process_user_status_from_temp_table() cannot be performed) and never re-enables. It only suspends:
+     *  - accounts whose binding value is not present in Entra at all (treated as deleted), when $dosuspend is on;
+     *  - accounts found in Entra but with accountEnabled = false, when $dodisabledsyncsuspend is on.
+     *
+     * Matching accounts that are already suspended are reported separately (no action taken) so the admin gets a full
+     * picture of the unlinked accounts that are gone from / disabled in Entra ID.
+     *
+     * Guest-style usernames are skipped. If the configured binding claim cannot be mapped to a Graph field, or the temp
+     * table holds no binding values at all, this is a no-op (protects against mass suspension from a misconfiguration).
+     *
+     * @param string $temptablename The name of the temporary table with Entra users.
+     * @param bool $dosuspend Whether to suspend accounts not found in Entra.
+     * @param bool $dodisabledsyncsuspend Whether to suspend accounts found in Entra but disabled.
+     * @return int Number of accounts newly suspended.
+     */
+    private function suspend_unlinked_users_from_temp_table(
+        string $temptablename,
+        bool $dosuspend,
+        bool $dodisabledsyncsuspend
+    ): int {
+        global $CFG, $DB;
+
+        if (self::get_binding_graph_field() === null) {
+            $this->mtrace('Skipping accounts with no Microsoft link: the binding username claim is not a Graph field.');
+            return 0;
+        }
+
+        if (!$DB->record_exists_select($temptablename, 'bindingvalue IS NOT NULL')) {
+            $this->mtrace('Skipping accounts with no Microsoft link: no binding values were returned from Entra ID.');
+            return 0;
+        }
+
+        // Group by user: a binding value can (rarely) match more than one Entra account. Treat the user as present in
+        // Entra if any row matched, and as enabled if any matching account is enabled (conservative - avoids suspending
+        // someone who still has an active account).
+        $sql = 'SELECT u.id, u.username, u.suspended,
+                       MAX(CASE WHEN etmp.bindingvalue IS NOT NULL THEN 1 ELSE 0 END) AS isinentra,
+                       MAX(COALESCE(etmp.accountenabled, 0)) AS accountenabled
+                  FROM {user} u
+             LEFT JOIN {local_o365_objects} obj ON obj.type = ? AND obj.moodleid = u.id
+             LEFT JOIN {' . $temptablename . '} etmp ON etmp.bindingvalue = LOWER(u.username)
+                 WHERE u.mnethostid = ?
+                   AND u.deleted = ?
+                   AND u.auth = ?
+                   AND obj.id IS NULL
+              GROUP BY u.id, u.username, u.suspended';
+        $params = ['user', $CFG->mnet_localhost_id, '0', 'oidc'];
+
+        $rs = $DB->get_recordset_sql($sql, $params);
+
+        $count = 0;
+        $tosuspend = [];
+        $alreadysuspendedcount = 0;
+        $alreadysuspendedsample = [];
+        $samplecap = 50;
+        foreach ($rs as $user) {
+            // Skip guest-style accounts - their username rarely maps cleanly to a binding value.
+            if (stripos($user->username, '_ext_') !== false || stripos($user->username, '#ext#') !== false) {
+                continue;
+            }
+
+            $reason = null;
+            if (!$user->isinentra && $dosuspend) {
+                $reason = 'not found in Entra ID';
+            } else if ($user->isinentra && !$user->accountenabled && $dodisabledsyncsuspend) {
+                $reason = 'disabled in Entra ID';
+            }
+
+            if ($reason === null) {
+                continue;
+            }
+
+            if ($user->suspended) {
+                // Already suspended - report only, do not touch. Keep a capped sample rather than the whole list.
+                $alreadysuspendedcount++;
+                if (count($alreadysuspendedsample) < $samplecap) {
+                    $alreadysuspendedsample[] = $user->username . ' (' . $reason . ')';
+                }
+                continue;
+            }
+
+            $tosuspend[] = $user->id;
+            $this->mtrace('Suspended ' . $user->username . ' (' . $reason . '; no stored Microsoft link)');
+            $count++;
+
+            if (count($tosuspend) >= 500) {
+                $this->update_users_suspended(1, $tosuspend);
+                $tosuspend = [];
+            }
+        }
+        $rs->close();
+
+        if (!empty($tosuspend)) {
+            $this->update_users_suspended(1, $tosuspend);
+        }
+
+        if ($alreadysuspendedcount > 0) {
+            $this->mtrace($alreadysuspendedcount . ' account(s) with no stored Microsoft link are missing from or ' .
+                'disabled in Entra ID but are already suspended (no action taken):');
+            foreach ($alreadysuspendedsample as $line) {
+                $this->mtrace('  ' . $line);
+            }
+            if ($alreadysuspendedcount > count($alreadysuspendedsample)) {
+                $this->mtrace('  ... and ' . ($alreadysuspendedcount - count($alreadysuspendedsample)) . ' more.');
+            }
+        }
+
+        return $count;
+    }
+
+    /**
+     * Get the configured Microsoft 365 group filter for user sync.
+     *
+     * @return string|null The group object ID if configured, null otherwise
+     */
+    public function get_usersync_group_filter(): ?string {
+        $groupid = get_config('local_o365', 'usersyncgroupfilter');
+        return !empty($groupid) ? trim($groupid) : null;
     }
 }

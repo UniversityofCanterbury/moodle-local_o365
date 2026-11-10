@@ -23,12 +23,15 @@
  * @copyright (C) 2018 onwards Microsoft, Inc. (http://microsoft.com/)
  */
 
+use core\context\system;
+use core\url;
+
 // phpcs:ignore moodle.Files.RequireLogin.Missing -- This file is called from Microsoft Teams tab.
 require_once(__DIR__ . '/../../config.php');
 
-$url = new moodle_url('/local/o365/teams_tab_configuration.php');
+$url = new url('/local/o365/teams_tab_configuration.php');
 
-$PAGE->set_context(context_system::instance());
+$PAGE->set_context(system::instance());
 
 // Force a theme without navigation and block.
 $customtheme = get_config('local_o365', 'customtheme');
@@ -39,15 +42,15 @@ if (!empty($customtheme) && get_config('theme_' . $customtheme, 'version')) {
 }
 
 echo "<link rel=\"stylesheet\" type=\"text/css\" href=\"styles.css\">";
-echo "<script src=\"https://statics.teams.microsoft.com/sdk/v1.9.0/js/MicrosoftTeams.min.js\" crossorigin=\"anonymous\"></script>";
-echo "<script src=\"https://secure.aadcdn.microsoftonline-p.com/lib/1.0.17/js/adal.min.js\" crossorigin=\"anonymous\"></script>";
+echo "<script src=\"" . $CFG->wwwroot . "/local/o365/js/MicrosoftTeams.min.js\"></script>";
+echo "<script src=\"" . $CFG->wwwroot . "/local/o365/js/msal-browser.min.js\"></script>";
 echo "<script src=\"https://code.jquery.com/jquery-3.1.1.js\" crossorigin=\"anonymous\"></script>";
 
-$redirecturl = new moodle_url('/local/o365/teams_tab_redirect.php');
-$ssostarturl = new moodle_url('/local/o365/sso_start.php');
-$oidcloginurl = new moodle_url('/auth/oidc/index.php');
-$externalloginurl = new moodle_url('/login/index.php');
-$ssologinurl = new moodle_url('/local/o365/sso_login.php');
+$redirecturl = new url('/local/o365/teams_tab_redirect.php');
+$ssostarturl = new url('/local/o365/sso_start.php');
+$oidcloginurl = new url('/auth/oidc/index.php');
+$externalloginurl = new url('/login/index.php');
+$ssologinurl = new url('/local/o365/sso_login.php');
 
 $url->params(['sesskey' => sesskey()]);
 $SESSION->wantsurl = $url;
@@ -55,11 +58,17 @@ $SESSION->wantsurl = $url;
 // Output login pages.
 echo html_writer::start_div('local_o365_manual_login');
 // Microsoft Entra ID login box.
-echo html_writer::tag('button', get_string('sso_login', 'local_o365'),
-    ['onclick' => 'login()', 'class' => 'local_o365_manual_login_button']);
+echo html_writer::tag(
+    'button',
+    get_string('sso_login', 'local_o365'),
+    ['onclick' => 'login()', 'class' => 'local_o365_manual_login_button']
+);
 // Manual login link.
-echo html_writer::tag('button', get_string('other_login', 'local_o365'),
-    ['onclick' => 'otherLogin()', 'class' => 'local_o365_manual_login_button']);
+echo html_writer::tag(
+    'button',
+    get_string('other_login', 'local_o365'),
+    ['onclick' => 'otherLogin()', 'class' => 'local_o365_manual_login_button']
+);
 echo html_writer::end_div();
 
 $tenantid = get_config('local_o365', 'entratenantid');
@@ -68,38 +77,38 @@ if (!$tenantid) {
 }
 
 $js = "
-microsoftTeams.initialize();
+// Initialize Teams SDK - must wait for it to complete before using other Teams APIs
+microsoftTeams.app.initialize().then(function() {
+    if (!inIframe() && !isMobileApp()) {
+        window.location.href = '" . $redirecturl->out(false) . "';
+    }
 
-if (!inIframe() && !isMobileApp()) {
-    window.location.href = '" . $redirecturl->out(false) . "';
-}
+    // Start SSO login after initialization
+    ssoLogin();
+}).catch(function(error) {
+    console.error('Teams SDK initialization failed: ' + error);
+    // Show manual login if Teams SDK fails
+    $('.local_o365_manual_login').css('display', 'block');
+    $('#local_o365_course_list').css('display', 'none');
+});
 
-let queryParams = getQueryParameters();
-let loginHint = queryParams['loginHint'];
 let tenantId = '{$tenantid}';
 
-let config = {
-    tenant: tenantId,
-    clientId: '" . get_config('auth_oidc', 'clientid') . "',
-    redirectUri: '" . $CFG->wwwroot . "/local/sso_end.php',
-    cacheLocation: 'localStorage',
-    navigateToLoginRequestUrl: false,
-    extraQueryParameter: 'scope=openid+profile&login_hint=' + encodeURIComponent(loginHint),
+// MSAL configuration
+const msalConfig = {
+    auth: {
+        clientId: '" . get_config('auth_oidc', 'clientid') . "',
+        authority: 'https://login.microsoftonline.com/' + tenantId,
+        redirectUri: '" . $CFG->wwwroot . "/local/o365/sso_end.php',
+        navigateToLoginRequestUrl: false
+    },
+    cache: {
+        cacheLocation: 'localStorage',
+        storeAuthStateInCookie: false
+    }
 };
 
 window.onload = setTitles;
-
-// Parse query parameters into key-value pairs
-function getQueryParameters() {
-    let queryParams = {};
-    location.search.substr(1).split('&').forEach(function(item) {
-        let s = item.split('='),
-        k = s[0],
-        v = s[1] && decodeURIComponent(s[1]);
-        queryParams[k] = v;
-    });
-    return queryParams;
-}
 
 function setTitles() {
     var text;
@@ -152,13 +161,13 @@ function onCourseChange() {
     var tabname =  document.getElementsByName('local_o365_teams_tab_name')[0];
     var tabnamevalue = tabname.value;
 
-    microsoftTeams.settings.setSettings({
+    microsoftTeams.pages.config.setConfig({
         entityId: 'course_' + courseid,
         contentUrl: '" . $CFG->wwwroot . "/local/o365/teams_tab.php?id=' + courseid,
         websiteUrl: '" . $CFG->wwwroot . "/course/view.php?id=' + courseid,
-        suggestedTabName: tabnamevalue,
+        suggestedDisplayName: tabnamevalue,
     });
-    microsoftTeams.settings.setValidityState(true);
+    microsoftTeams.pages.config.setValidityState(true);
 }
 
 function onTabNameChange() {
@@ -168,11 +177,11 @@ function onTabNameChange() {
     var tabname =  document.getElementsByName('local_o365_teams_tab_name')[0];
     var tabnamevalue = tabname.value;
 
-    microsoftTeams.settings.setSettings({
+    microsoftTeams.pages.config.setConfig({
         entityId: 'course_' + courseid,
         contentUrl: '" . $CFG->wwwroot . "/local/o365/teams_tab.php?id=' + courseid,
         websiteUrl: '" . $CFG->wwwroot . "/course/view.php?id=' + courseid,
-        suggestedTabName: tabnamevalue,
+        suggestedDisplayName: tabnamevalue,
     });
 }
 
@@ -180,29 +189,32 @@ function login() {
     microsoftTeams.authentication.authenticate({
         url: '" . $ssostarturl->out(false) . "',
         width: 600,
-        height: 400,
-        successCallback: function (result) {
-            // AuthenticationContext is a singleton
-            let authContext = new AuthenticationContext(config);
-            let idToken = authContext.getCachedToken(config.clientId);
-
-            if (idToken) {
-                // login using the token
+        height: 400
+    }).then(function (result) {
+        // MSAL - check if user is authenticated
+        const msalInstance = new msal.PublicClientApplication(msalConfig);
+        msalInstance.initialize().then(() => {
+            const accounts = msalInstance.getAllAccounts();
+            if (accounts.length > 0) {
+                // login using the authenticated account
                 window.location.href = '" . $oidcloginurl->out(false) . "';
             } else {
-                console.error('Error getting cached id token. This should never happen.');
+                console.error('Error: No authenticated account found. This should never happen.');
                 // At this point sso login does not work. redirect to normal Moodle login page.
                 window.location.href = '" . $externalloginurl->out(false) . "';
-            };
-        },
-        failureCallback: function (reason) {
-            console.log('Login failed: ' + reason);
-            if (reason === 'CancelledByUser' || reason === 'FailedToOpenWindow') {
-                console.log('Login was blocked by popup blocker or canceled by user.');
             }
-            // At this point sso login does not work. redirect to normal Moodle login page.
+        }).catch(function (error) {
+            console.error('MSAL initialization failed: ' + error);
+            // MSAL initialization failed. redirect to normal Moodle login page.
             window.location.href = '" . $externalloginurl->out(false) . "';
+        });
+    }).catch(function (reason) {
+        console.log('Login failed: ' + reason);
+        if (reason === 'CancelledByUser' || reason === 'FailedToOpenWindow') {
+            console.log('Login was blocked by popup blocker or canceled by user.');
         }
+        // At this point sso login does not work. redirect to normal Moodle login page.
+        window.location.href = '" . $externalloginurl->out(false) . "';
     });
 }
 
@@ -214,15 +226,15 @@ function ssoLogin() {
     var isloggedin = " . (int) ($USER->id != 0) . ";
 
     if (!isloggedin) {
-        microsoftTeams.authentication.getAuthToken({
-            successCallback: (result) => {
+        microsoftTeams.authentication.getAuthToken()
+            .then((result) => {
                 const url = '" . $ssologinurl->out() . "';
 
                 return fetch(url, {
                     method: 'POST',
                     headers: {
                         'Content-Type' : 'application/x-www-form-urlencoded',
-                        'Authorization' : result
+                        'Authorization' : 'Bearer ' + result
                     },
                     mode: 'cors',
                     cache: 'default'
@@ -239,17 +251,14 @@ function ssoLogin() {
                         $('#local_o365_course_list').css('display', 'none');
                     }
                 });
-            },
-            failureCallback: function (error) {
+            })
+            .catch(function (error) {
                 // Manual login.
                 $('.local_o365_manual_login').css('display', 'block');
                 $('#local_o365_course_list').css('display', 'none');
-            }
-        });
+            });
     }
 }
-
-ssoLogin();
 ";
 
 echo html_writer::script($js);

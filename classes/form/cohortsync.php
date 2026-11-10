@@ -31,12 +31,20 @@ require_once($CFG->libdir . '/formslib.php');
 
 use html_table;
 use html_writer;
-use moodle_url;
+use core\url;
 use moodleform;
 use MoodleQuickForm;
 
-MoodleQuickForm::registerElementType('group_autocomplete', "$CFG->dirroot/local/o365/classes/form/group_autocomplete.php", 'local_o365\form\group_autocomplete');
-MoodleQuickForm::registerElementType('cohort_autocomplete', "$CFG->dirroot/local/o365/classes/form/cohort_autocomplete.php", 'local_o365\form\cohort_autocomplete');
+MoodleQuickForm::registerElementType(
+    'group_autocomplete',
+    "$CFG->dirroot/local/o365/classes/form/group_autocomplete.php",
+    'local_o365\form\group_autocomplete'
+);
+MoodleQuickForm::registerElementType(
+    'cohort_autocomplete',
+    "$CFG->dirroot/local/o365/classes/form/cohort_autocomplete.php",
+    'local_o365\form\cohort_autocomplete'
+);
 
 /**
  * Class cohortsync.
@@ -68,10 +76,20 @@ class cohortsync extends moodleform {
 
         // Display group selector.
         $buttonattributes = [];
-        $mform->addElement('group_autocomplete', 'groupoid', get_string('cohortsync_select_group', 'local_o365'), ['cohortsyncmain' => $cohortsyncmain]);
+        $mform->addElement(
+            'group_autocomplete',
+            'groupoid',
+            get_string('cohortsync_select_group', 'local_o365'),
+            ['cohortsyncmain' => $cohortsyncmain]
+        );
 
         // Display cohort selector.
-        $mform->addElement('cohort_autocomplete', 'cohortid', get_string('cohortsync_select_cohort', 'local_o365'), ['cohortsyncmain' => $cohortsyncmain]);
+        $mform->addElement(
+            'cohort_autocomplete',
+            'cohortid',
+            get_string('cohortsync_select_cohort', 'local_o365'),
+            ['cohortsyncmain' => $cohortsyncmain]
+        );
 
         // Display submit button.
         $mform->addElement('submit', 'action', get_string('cohortsync_addmapping', 'local_o365'), $buttonattributes);
@@ -94,22 +112,49 @@ class cohortsync extends moodleform {
                 $groupname = $cohortsyncmain->get_group_name_by_group_oid($mapping->objectid);
                 $cohortname = $cohortsyncmain->get_cohort_name_by_cohort_id($mapping->moodleid);
 
-                $cohorturl = new moodle_url('/cohort/edit.php', ['id' => $mapping->moodleid]);
+                $cohorturl = new url('/cohort/edit.php', ['id' => $mapping->moodleid]);
 
-                $deletemappingurl = new moodle_url('/local/o365/cohortsync.php',
-                    ['action' => 'delete', 'connectionid' => $mapping->id]);
+                $deletemappingurl = new url(
+                    '/local/o365/cohortsync.php',
+                    ['action' => 'delete', 'connectionid' => $mapping->id, 'sesskey' => sesskey()]
+                );
                 $existingmappingstable->data[] = [
-                    $groupname,
-                    html_writer::link($cohorturl, $cohortname),
-                    html_writer::link($deletemappingurl, get_string('cohortsync_deletemapping', 'local_o365'),
-                        ['class' => 'btn btn-primary']),
+                    s($groupname),
+                    html_writer::link($cohorturl, s($cohortname)),
+                    html_writer::link(
+                        $deletemappingurl,
+                        get_string('cohortsync_deletemapping', 'local_o365'),
+                        ['class' => 'btn btn-primary']
+                    ),
                 ];
             }
+
             $existingmappingscontent .= html_writer::table($existingmappingstable);
         }
 
         $existingmappingscontent .= html_writer::end_div();
 
         $mform->addElement('html', $existingmappingscontent);
+    }
+
+    /**
+     * Validate that both selectors have a selected value before submitting.
+     *
+     * @param array $data Form data.
+     * @param array $files Uploaded files.
+     * @return array Validation errors keyed by element name.
+     */
+    public function validation($data, $files): array {
+        $errors = parent::validation($data, $files);
+
+        if (empty($data['groupoid'])) {
+            $errors['groupoid'] = get_string('cohortsync_error_no_group', 'local_o365');
+        }
+
+        if (empty($data['cohortid'])) {
+            $errors['cohortid'] = get_string('cohortsync_error_no_cohort', 'local_o365');
+        }
+
+        return $errors;
     }
 }
